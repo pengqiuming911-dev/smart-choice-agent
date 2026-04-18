@@ -263,6 +263,47 @@ def insert_chat_log(
         return result[0]
 
 
+def get_session_history(session_id: str, limit: int = 10) -> List[dict]:
+    """
+    Get chat logs for a specific session.
+
+    Args:
+        session_id: Session ID to look up
+        limit: Maximum number of logs to return
+
+    Returns:
+        List of chat log entries for the session
+    """
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT id, session_id, user_open_id, user_name, question,
+                   answer, retrieved_chunks, citations, latency_ms,
+                   llm_model, created_at
+            FROM chat_logs
+            WHERE session_id = %s
+            ORDER BY created_at ASC
+            LIMIT %s
+        """, (session_id, limit))
+
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "session_id": r[1],
+                "user_open_id": r[2],
+                "user_name": r[3],
+                "question": r[4],
+                "answer": r[5],
+                "retrieved_chunks": r[6],
+                "citations": r[7],
+                "latency_ms": r[8],
+                "llm_model": r[9],
+                "created_at": r[10],
+            }
+            for r in rows
+        ]
+
+
 def get_chat_logs(
     user_open_id: str = None,
     limit: int = 100,
