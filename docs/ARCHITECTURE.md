@@ -526,7 +526,7 @@ pe-kb-mvp/
 | 数据访问 | models/db.py | ✅ | 文档 / 权限 / 审计 / 合格投资者 |
 | 同步 Pipeline | sync/pipeline.py | ✅ | full_sync + sync_doc 命令 |
 | FastAPI 接口 | agent/api.py、agent/models.py | ✅ | POST /api/v1/chat、/api/v1/search、/api/v1/health (Step 7 完成) |
-| 飞书机器人 | bot_service/src/* | ⏳ | 事件接收 + 卡片渲染 + 调用 RAG |
+| 飞书机器人 | bot_service/src/* | ✅ | 事件接收 + 卡片渲染 + 调用 RAG (Step 8 完成) |
 
 ---
 
