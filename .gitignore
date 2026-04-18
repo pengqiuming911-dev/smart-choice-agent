@@ -26,3 +26,7 @@ Thumbs.db
 # Data
 data/
 *.log
+
+# Bot service
+bot_service/node_modules/
+bot_service/dist/
