@@ -23,11 +23,23 @@
 
 ### 2. `rag_service/agent/api.py`
 
-FastAPI 问答接口服务：
+FastAPI 问答接口服务（Step 7 实现）：
 
-- `POST /api/question` - 问答接口
-- `GET /api/health` - 健康检查
-- `GET /api/stats` - 知识库统计
+- `POST /api/v1/chat` - 问答接口
+- `POST /api/v1/search` - 检索接口
+- `GET /api/v1/health` - 健康检查
+- `GET /api/v1/stats` - 知识库统计
+
+特性：
+- Request ID 注入（X-Request-ID）
+- 请求日志记录
+- 60 秒超时保护
+- 全局异常处理
+- CORS 支持
+
+### 3. `rag_service/agent/models.py`
+
+Pydantic 数据模型定义
 
 ## 使用方式
 
@@ -53,9 +65,9 @@ python -m rag_service.agent.api
 
 ```bash
 # 测试示例
-curl -X POST http://localhost:8080/api/question \
+curl -X POST http://localhost:8080/api/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{"question": "私募基金的投资策略有哪些？"}'
+  -d '{"user_open_id": "ou_test", "user_name": "测试", "question": "私募基金的投资策略有哪些？"}'
 ```
 
 ### Python 代码调用
@@ -73,6 +85,20 @@ print(result["answer"])       # 答案文本
 print(result["citations"])     # 引用来源
 print(result["latency_ms"])   # 响应耗时
 ```
+
+## 测试
+
+### Step 7 测试套件
+
+```bash
+# API 契约测试
+python -m pytest tests/step7_api_contract.py -v
+
+# 混沌测试
+python -m pytest tests/step7_chaos.py -v
+```
+
+**测试结果：14 passed**
 
 ## 依赖更新
 
