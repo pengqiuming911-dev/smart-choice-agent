@@ -462,33 +462,42 @@ pe-kb-mvp/
 │   └── init.sql                    # PG 建表脚本
 │
 ├── rag_service/                    # Agent + RAG 核心服务 (Python)
-│   └── app/
-│       ├── __init__.py
-│       ├── config.py               # 统一配置 (pydantic-settings)
-│       ├── main.py                 # (待补) FastAPI 入口
-│       │
-│       ├── feishu/                 # 飞书 API 封装
-│       │   ├── client.py           # tenant_access_token + wiki + docx API
-│       │   └── block_parser.py     # block 树 → Markdown 解析器
-│       │
-│       ├── rag/                    # RAG 核心
-│       │   ├── chunker.py          # 标题 + token 混合分块
-│       │   ├── embedder.py         # 通义 Embedding 封装
-│       │   └── vector_store.py     # Qdrant 封装(含权限 filter)
-│       │
-│       ├── agent/                  # Agent 编排
-│       │   ├── compliance.py       # 合规校验
-│       │   ├── llm.py              # LLM 调用
-│       │   └── workflow.py         # 主工作流(8 步闭环)
-│       │
-│       ├── models/
-│       │   └── db.py               # PG 操作
-│       │
-│       ├── api/                    # (待补) HTTP API
-│       │   └── routes.py           # /chat /search /health
-│       │
-│       └── sync/
-│           └── pipeline.py         # full_sync / sync_docx
+│   ├── __init__.py
+│   ├── config.py                   # 环境变量配置
+│   │
+│   ├── feishu/                     # 飞书 API 封装
+│   │   ├── client.py               # tenant_access_token + wiki + docx API
+│   │   ├── block_parser.py         # block 树 → Markdown 解析器
+│   │   ├── auth_tool.py            # OAuth 令牌管理
+│   │   ├── auth_server.py          # OAuth 授权服务
+│   │   ├── oauth.py                # OAuth 封装
+│   │   └── user_client.py          # 用户级 API 客户端
+│   │
+│   ├── rag/                        # RAG 核心
+│   │   ├── chunker.py              # 标题 + token 混合分块
+│   │   ├── embedder.py             # bge-m3 Embedding 封装
+│   │   └── vector_store.py         # Qdrant 封装(含权限 filter)
+│   │
+│   ├── agent/                      # Agent 编排 (Step 7 完成)
+│   │   ├── rag_agent.py            # RAG 主 Agent
+│   │   ├── api.py                  # FastAPI 入口
+│   │   ├── models.py               # Pydantic 数据模型
+│   │   ├── llm.py                  # LLM 调用
+│   │   └── compliance.py           # 合规校验
+│   │
+│   ├── models/
+│   │   └── db.py                   # PG 操作
+│   │
+│   └── sync/
+│       └── pipeline.py             # full_sync / sync_folder 命令
+│
+├── tests/                          # 测试套件
+│   ├── step2_test_cases.json
+│   ├── step4_smoke.py
+│   ├── step5_*.py
+│   ├── step6_*.py
+│   ├── step7_api_contract.py       # Step 7 API 测试 (14 passed)
+│   └── step7_chaos.py
 │
 ├── sync_service/                   # (待补) 独立部署的同步服务
 │
@@ -505,7 +514,7 @@ pe-kb-mvp/
 | 模块 | 文件 | 状态 | 说明 |
 |------|------|------|------|
 | Docker 基础设施 | docker-compose.yml、scripts/init.sql | ✅ | Qdrant + PG + Redis,含建表 SQL |
-| 配置管理 | rag_service/app/config.py、.env.example | ✅ | pydantic-settings 统一配置 |
+| 配置管理 | rag_service/config.py、.env.example | ✅ | 环境变量统一配置 |
 | 飞书客户端 | feishu/client.py | ✅ | token 自动刷新 + wiki + docx API |
 | Block 解析 | feishu/block_parser.py | ✅ | 处理标题/列表/代码/引用/表格(表格简化版) |
 | 分块器 | rag/chunker.py | ✅ | 标题 + token 混合分块,带 heading 面包屑 |
@@ -516,7 +525,7 @@ pe-kb-mvp/
 | 主工作流 | agent/workflow.py | ✅ | 完整 8 步闭环 |
 | 数据访问 | models/db.py | ✅ | 文档 / 权限 / 审计 / 合格投资者 |
 | 同步 Pipeline | sync/pipeline.py | ✅ | full_sync + sync_doc 命令 |
-| FastAPI 接口 | api/routes.py、main.py | ⏳ | 暴露 /chat /search /sync |
+| FastAPI 接口 | agent/api.py、agent/models.py | ✅ | POST /api/v1/chat、/api/v1/search、/api/v1/health (Step 7 完成) |
 | 飞书机器人 | bot_service/src/* | ⏳ | 事件接收 + 卡片渲染 + 调用 RAG |
 
 ---
