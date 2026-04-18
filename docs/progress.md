@@ -1,4 +1,52 @@
-# RAG 问答 Agent 实现
+# 项目进展
+
+## Step 7: FastAPI 接口层 ✅
+
+已实现 FastAPI 接口服务，包括：
+- `POST /api/v1/chat` - RAG 问答
+- `POST /api/v1/search` - 检索
+- `GET /api/v1/health` - 健康检查
+- 14 个 API 测试全部通过
+
+## Step 8: 飞书机器人接入 ✅
+
+已实现飞书机器人服务：
+- WebSocket 长连接接收消息
+- 消息卡片渲染
+- 事件去重、Redis 会话管理
+- RAG 服务集成
+
+## Step 9: 内测灰度 (进行中)
+
+### 已完成的基础设施
+
+- `tests/step9_metrics_dashboard.py` - 每日指标仪表板
+- `docs/step9-daily-metrics/` - 每日数据记录
+- `docs/step9-bad-case-analysis.md` - Bad Case 分析模板
+- `docs/step9-user-survey.md` - 用户满意度问卷
+- `docs/step9-retro.md` - 内测复盘模板
+
+### 使用方式
+
+```bash
+# 查看今日指标
+python tests/step9_metrics_dashboard.py
+
+# 查看最近7天趋势
+python tests/step9_metrics_dashboard.py --days 7
+
+# 导出报告
+python tests/step9_metrics_dashboard.py --days 7 --output docs/step9-daily-metrics/report.md
+```
+
+### Step 9 主要任务
+
+1. **用户引导**: 建内测群，拉用户，一对一 onboarding
+2. **每日运营**: 统计指标，复核 Bad Case
+3. **每周 Review**: 展示趋势，决定优先级
+4. **合规抽查**: 每日由合规同事抽查 20 条对话
+
+---
 
 ## 概述
 
