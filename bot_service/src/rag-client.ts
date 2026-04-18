@@ -1,4 +1,4 @@
-"""RAG Service HTTP Client"""
+// RAG Service HTTP Client
 import axios, { AxiosInstance } from "axios";
 import { config } from "./config";
 

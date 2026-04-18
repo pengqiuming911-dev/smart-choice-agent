@@ -1,4 +1,4 @@
-"""Session Manager using Redis for multi-turn conversation context"""
+// Session Manager using Redis for multi-turn conversation context
 import Redis from "ioredis";
 import { config } from "./config";
 
@@ -27,7 +27,6 @@ export class SessionManager {
   constructor() {
     this.redis = new Redis(config.redis.url, {
       maxRetriesPerRequest: 3,
-      retryDelayOnFailover: 100,
     });
 
     this.redis.on("error", (err) => {

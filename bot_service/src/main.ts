@@ -1,79 +1,81 @@
-"""PE Knowledge Base Bot - Main Entry Point"""
+// PE Knowledge Base Bot - Main Entry Point
+
 import "dotenv/config";
+import * as lark from "@larksuiteoapi/node-sdk";
 import { config } from "./config";
 import { RAGClient } from "./rag-client";
 import { SessionManager } from "./session-manager";
-import { EventHandler, FeishuEvent } from "./event-handler";
-import { Client, Constants } from "@larksuiteoapi/node-sdk";
+import { EventHandler } from "./event-handler";
 
 // Initialize clients
 const ragClient = new RAGClient();
 const sessionManager = new SessionManager();
 const eventHandler = new EventHandler({ ragClient, sessionManager });
 
-// Initialize Feishu client with WebSocket mode (WsClient)
-// This avoids needing a public IP for webhook callbacks
-const client = new Client({
+// Create Feishu client
+const client = new lark.Client({
   appId: config.feishu.appId,
   appSecret: config.feishu.appSecret,
-  loggerLevel: Constants.LoggerLevel.info,
+  loggerLevel: lark.LoggerLevel.info,
 });
 
-// Event types to subscribe
-const subscribedEvents = [
-  "im.message.receive_v1", // Receive messages
-];
+// Event dispatcher - register handlers using SDK's event type
+const eventDispatcher = new lark.EventDispatcher({}).register({
+  "im.message.receive_v1": async (data: any) => {
+    console.log(
+      `Received event: ${data.event_type} from ${data.sender?.sender_id?.open_id || "unknown"}`
+    );
 
-// Create message event handler
-const messageHandler = async (data: FeishuEvent) => {
-  console.log(
-    `Received event: ${data.header.event_type} from ${data.event.message?.sender_id?.open_id || "unknown"
-    }`
-  );
+    try {
+      const response = await eventHandler.handle(data);
 
-  try {
-    const response = await eventHandler.handle(data);
-
-    if (response === null) {
-      console.log("Event handled, no response needed");
-      return;
-    }
-
-    // If it's a card, send it back as an update
-    if (data.event.message && data.event.message.message_id) {
-      const message = data.event.message;
-
-      if ("content" in response && typeof response === "object" && "type" in response) {
-        // It's a card
-        await sendCardMessage(message.chat_id, response as object, message.message_id);
-      } else if (typeof response === "object" && "type" in response && (response as any).type === "text") {
-        // It's a text response
-        await sendTextMessage(message.chat_id, (response as any).content, message.message_id);
+      if (response === null) {
+        console.log("Event handled, no response needed");
+        return;
       }
+
+      // Send response as text for now (debugging card format)
+      if (data.message && data.message.message_id) {
+        const chatId = data.message.chat_id;
+
+        // Always send as text to verify RAG flow works
+        if ("answer" in (response as any)) {
+          const answer = (response as any).answer || "无回答";
+          const citations = (response as any).citations || [];
+          let text = `${answer}`;
+          if (citations.length > 0) {
+            text += `\n\n引用文档:\n${citations.map((c: any, i: number) => `${i+1}. ${c.title}`).join("\n")}`;
+          }
+          await sendTextMessage(chatId, text);
+        } else {
+          await sendTextMessage(chatId, JSON.stringify(response));
+        }
+      }
+    } catch (err) {
+      console.error("Error processing event:", err);
     }
-  } catch (err) {
-    console.error("Error processing event:", err);
-  }
-};
+  },
+});
+
+// WebSocket client for long connection
+const wsClient = new lark.WSClient({
+  appId: config.feishu.appId,
+  appSecret: config.feishu.appSecret,
+});
 
 /**
  * Send text message reply
  */
-async function sendTextMessage(
-  chatId: string,
-  content: string,
-  replyMessageId?: string
-): Promise<void> {
+async function sendTextMessage(chatId: string, content: string): Promise<void> {
   try {
     await client.im.message.create({
-      path: { receive_id: chatId },
       params: {
         receive_id_type: "chat_id",
       },
       data: {
+        receive_id: chatId,
         msg_type: "text",
         content: JSON.stringify({ text: content }),
-        reply_in_thread_id: replyMessageId || undefined,
       },
     });
   } catch (err) {
@@ -84,21 +86,16 @@ async function sendTextMessage(
 /**
  * Send interactive card message
  */
-async function sendCardMessage(
-  chatId: string,
-  card: object,
-  replyMessageId?: string
-): Promise<void> {
+async function sendCardMessage(chatId: string, card: object): Promise<void> {
   try {
     await client.im.message.create({
-      path: { receive_id: chatId },
       params: {
         receive_id_type: "chat_id",
       },
       data: {
+        receive_id: chatId,
         msg_type: "interactive",
         content: JSON.stringify(card),
-        reply_in_thread_id: replyMessageId || undefined,
       },
     });
   } catch (err) {
@@ -122,9 +119,10 @@ async function main() {
   const redisHealthy = await sessionManager.ping();
   console.log(`Redis health: ${redisHealthy ? "OK" : "UNAVAILABLE"}`);
 
-  // Subscribe to events using persistent WebSocket connection
-  // This keeps the bot running and automatically reconnects
-  client.event.subscribe("im.message.receive_v1", messageHandler);
+  // Start WebSocket client with event dispatcher
+  await wsClient.start({
+    eventDispatcher: eventDispatcher,
+  });
 
   console.log("Bot is running. Press Ctrl+C to stop.");
 
@@ -132,6 +130,7 @@ async function main() {
   process.on("SIGINT", async () => {
     console.log("\nShutting down...");
     await sessionManager.close();
+    wsClient.close({ force: true });
     process.exit(0);
   });
 }

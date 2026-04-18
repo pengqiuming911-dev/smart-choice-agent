@@ -66,19 +66,21 @@ class RAGAgent:
         # Embed the query
         query_embedding = embed_query(query)
 
-        # Build filter
+        # Build filter using qdrant models
+        from qdrant_client.http.models import Filter, FieldCondition, MatchAny
+
         must_conditions = []
         if filters:
             must_conditions.append(filters)
         if doc_ids:
-            must_conditions.append({
-                "must": [
-                    {"key": "document_id", "match": {"value": doc_id}}
-                    for doc_id in doc_ids
-                ]
-            })
+            must_conditions.append(
+                FieldCondition(
+                    key="document_id",
+                    match=MatchAny(any=doc_ids)
+                )
+            )
 
-        filter_condition = {"must": must_conditions} if must_conditions else None
+        filter_condition = Filter(must=must_conditions) if must_conditions else None
 
         # Search Qdrant (using query_points API)
         results = self.qdrant.query_points(

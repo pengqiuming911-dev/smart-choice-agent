@@ -1,4 +1,4 @@
-"""Configuration for PE Knowledge Base Bot"""
+// Configuration for PE Knowledge Base Bot
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "yaml";

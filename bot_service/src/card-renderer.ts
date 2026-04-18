@@ -1,4 +1,4 @@
-"""Feishu Message Card Renderer"""
+// Feishu Message Card Renderer
 import { ChatResponse } from "./rag-client";
 
 export interface CardAction {
@@ -122,10 +122,6 @@ export function renderAnswerCard(
   // Card structure
   return {
     schema: "2.0",
-    config: {
-      WideScreenMode: true,
-      ENABLE Forward: true,
-    },
     header: {
       title: {
         tag: "plain_text",
@@ -143,9 +139,6 @@ export function renderAnswerCard(
 function renderComplianceCard(question: string): object {
   return {
     schema: "2.0",
-    config: {
-      WideScreenMode: true,
-    },
     header: {
       title: {
         tag: "plain_text",
@@ -189,9 +182,6 @@ function renderComplianceCard(question: string): object {
 export function renderErrorCard(errorMessage: string): object {
   return {
     schema: "2.0",
-    config: {
-      WideScreenMode: true,
-    },
     header: {
       title: {
         tag: "plain_text",
@@ -226,9 +216,6 @@ export function renderErrorCard(errorMessage: string): object {
 export function renderWaitingCard(): object {
   return {
     schema: "2.0",
-    config: {
-      WideScreenMode: true,
-    },
     header: {
       title: {
         tag: "plain_text",
