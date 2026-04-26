@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制代码
+COPY rag_service/ ./rag_service/
+
+# 复制环境变量文件（如果存在则复制，否则用容器内默认值）
+COPY .env.example .env 2>/dev/null || true
+
+# 默认命令
+CMD ["python", "-m", "rag_service.scheduler.scheduler"]

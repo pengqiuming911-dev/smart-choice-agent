@@ -12,9 +12,11 @@ DEFAULT_MODEL = "MiniMax-M2.7"
 
 def get_client() -> OpenAI:
     """Get MiniMax OpenAI-compatible client"""
+    from httpx import Timeout
     return OpenAI(
         api_key=os.getenv("MINIMAX_API_KEY"),
         base_url="https://api.minimaxi.com/v1",
+        timeout=Timeout(120.0, connect=30.0),  # 120s for overall request, 30s connect
     )
 
 

@@ -25,5 +25,10 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
     llm_model: str = "qwen-max"
 
+    # 定时调度（scheduler）
+    scheduler_target_open_id: str = ""  # 推送目标的飞书 open_id
+    scheduler_hour: int = 15  # 推送小时（24小时制）
+    scheduler_minute: int = 30  # 推送分钟
+
 
 settings = Settings()

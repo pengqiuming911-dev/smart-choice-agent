@@ -1,0 +1,10 @@
+# Scheduler Service - Minimal dependencies
+# 极简依赖，无重型 ML/Embedding 模型
+
+apscheduler==3.10.4
+httpx==0.27.2
+python-dotenv==1.0.1
+loguru==0.7.2
+akshare>=1.14
+lark-oapi==1.4.5
+pandas>=2.0

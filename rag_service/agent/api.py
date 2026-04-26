@@ -18,6 +18,7 @@ from rag_service.agent.models import (
 )
 from rag_service.agent.rag_agent import RAGAgent
 from rag_service.models.db import get_stats
+from rag_service.rag.embedder import get_embedder, embed_query
 
 # Configure logging
 logging.basicConfig(
@@ -39,8 +40,16 @@ def get_agent() -> RAGAgent:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan handler"""
+    """Application lifespan handler - preload models at startup"""
     logger.info("RAG API starting up...")
+
+    # Preload embedder model at startup to avoid first-request latency
+    logger.info("Preloading embedding model...")
+    embedder = get_embedder()
+    # Warmup with a dummy query
+    _ = embed_query("warmup")
+    logger.info("Embedding model ready")
+
     yield
     logger.info("RAG API shutting down...")
 

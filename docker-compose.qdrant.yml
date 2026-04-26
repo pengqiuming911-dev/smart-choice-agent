@@ -1,0 +1,18 @@
+# Qdrant 向量数据库 - 独立部署
+# 使用方式: docker-compose -f docker-compose.qdrant.yml up -d
+# 内存建议: 2GB+ RAM
+
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: pe-kb-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    # 限制内存，避免 OOM（根据实际情况调整）
+    # mem_limit: 1500m

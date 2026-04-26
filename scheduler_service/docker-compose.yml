@@ -1,0 +1,27 @@
+# Scheduler Service - 每日收盘报告推送
+# 依赖: AKShare(行情) + 飞书 Bitable(产品数据) + 飞书消息 API
+# 内存占用: ~200MB (无需 Qdrant/Embedding 模型)
+#
+# 部署步骤:
+#   docker-compose up -d --build
+#   docker logs -f scheduler-service
+
+services:
+  scheduler-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scheduler-service
+    environment:
+      - FEISHU_APP_ID=cli_a9257755deb99cc1
+      - FEISHU_APP_SECRET=YtezjkqYLLfxMsjzZOKebfbmSslMfRaz
+      - SCHEDULER_TARGET_OPEN_ID=ou_0bdbab58aa717d44c6ee93b5f984f2d3
+      - SCHEDULER_HOUR=15
+      - SCHEDULER_MINUTE=30
+      - BITABLE_APP_ID=Ray2bF0z2aBy3ps3fZecEobrn7g
+      - BITABLE_TABLE_ID=tblAhzosed0LG3SJ
+      - MARKET_INDICES=沪深300,中证500,中证1000,纳指ETF
+      - MONTHLY_DECREMENT=0.5
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

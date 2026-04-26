@@ -1,14 +1,20 @@
 """Embedding wrapper for PE knowledge base using local bge-m3 model"""
 import os
+import logging
 from typing import List
 from dotenv import load_dotenv
 
 # Load .env file
 load_dotenv()
 
+# HuggingFace cache home - default to user cache on Windows
+os.environ.setdefault("HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
+
 # bge-m3 configuration
 BGE_MODEL = os.getenv("BGE_MODEL", "BAAI/bge-m3")
 BGE_DEVICE = os.getenv("BGE_DEVICE", "cpu")  # cpu or cuda
+
+logger = logging.getLogger(__name__)
 
 
 class BGEM3Embedder:
@@ -27,9 +33,13 @@ class BGEM3Embedder:
         """Load bge-m3 model on first use"""
         try:
             from sentence_transformers import SentenceTransformer
-            print(f"Loading bge-m3 model: {BGE_MODEL} on {BGE_DEVICE}...")
-            self._model = SentenceTransformer(BGE_MODEL, device=BGE_DEVICE)
-            print("bge-m3 model loaded successfully")
+            logger.info(f"Loading bge-m3 model: {BGE_MODEL} on {BGE_DEVICE}...")
+            self._model = SentenceTransformer(
+                BGE_MODEL,
+                device=BGE_DEVICE,
+                local_files_only=True,  # Force offline mode
+            )
+            logger.info("bge-m3 model loaded successfully")
         except ImportError:
             raise RuntimeError("sentence-transformers not installed. Run: pip install sentence-transformers")
 

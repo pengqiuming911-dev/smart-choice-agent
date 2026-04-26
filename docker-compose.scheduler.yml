@@ -1,0 +1,26 @@
+# 定时调度服务 - 独立部署
+# 使用方式:
+#   单独部署: docker-compose -f docker-compose.scheduler.yml up -d
+#   带 Qdrant 一起: docker-compose -f docker-compose.scheduler.yml -f docker-compose.qdrant.yml up -d
+#   与主服务一起: docker-compose -f docker-compose.yml -f docker-compose.scheduler.yml up -d
+
+version: '3.8'
+
+services:
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    container_name: pe-kb-scheduler
+    environment:
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - SCHEDULER_TARGET_OPEN_ID=${SCHEDULER_TARGET_OPEN_ID}
+      - SCHEDULER_HOUR=${SCHEDULER_HOUR:-15}
+      - SCHEDULER_MINUTE=${SCHEDULER_MINUTE:-30}
+      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-pe_kb_chunks}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
+    restart: unless-stopped
+    # Qdrant 已移除，改为通过 QDRANT_URL 连接外部服务
+    # 如需在本机启动 Qdrant，另开 docker-compose -f docker-compose.qdrant.yml up -d
