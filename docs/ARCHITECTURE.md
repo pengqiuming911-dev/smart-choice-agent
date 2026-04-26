@@ -1,818 +1,1224 @@
-# 私募基金知识库 Agent - 架构设计文档
+# 团队 LLM Wiki 知识库 — 完整设计文档
 
-> 项目代号:`pe-kb-mvp`
-> 目标:基于飞书团队空间文档,构建面向内部员工与合格投资者的私募基金知识问答 Agent,通过飞书机器人交付
-> 版本:v0.1 (MVP)
-> 最后更新:2026-04-18
-
----
-
-## 目录
-
-1. [项目背景与目标](#1-项目背景与目标)
-2. [整体架构](#2-整体架构)
-3. [技术选型](#3-技术选型)
-4. [服务职责划分](#4-服务职责划分)
-5. [核心数据流](#5-核心数据流)
-6. [数据模型](#6-数据模型)
-7. [关键设计决策](#7-关键设计决策)
-8. [项目目录结构](#8-项目目录结构)
-9. [部署与启动](#9-部署与启动)
-10. [MVP 范围与后续迭代](#10-mvp-范围与后续迭代)
-11. [附录](#11-附录)
+> 基于 Andrej Karpathy 提出的 LLM Wiki 模式，构建一个面向团队的、可持续维护的内部知识库系统。
+>
+> 适用规模：约 100 篇文档、10~30 人团队
+> 文档版本：v1.2
+> 最后更新：2026-04-26
+>
+> v1.1 更新：新增第七章"飞书文档定时同步"
+> v1.2 更新：扩展第十章"技术栈推荐",增加完整前端选型与三大模块实现方案
 
 ---
 
-## 1. 项目背景与目标
+## 一、为什么选 LLM Wiki 而不是 RAG
 
-### 1.1 业务场景
+### 两种模式的核心区别
 
-私募基金管理公司的内部知识(研报、产品说明书、合同模板、投资决策会议纪要、法规合规文档等)高度依赖飞书团队空间(Wiki / 云文档)协作。随着文档体量增长,员工获取信息的效率下降,新人上手周期长,客户咨询响应不及时。
+| 维度 | 传统 RAG | LLM Wiki |
+|------|----------|----------|
+| 知识形态 | 原始文档 + 向量索引 | LLM 编译后的结构化 markdown |
+| 查询方式 | 每次重新检索原文片段 | LLM 先读索引，再读相关页面 |
+| 知识积累 | 无积累，每次从零发现 | 持续沉淀，越用越完整 |
+| 工程复杂度 | 需要向量数据库、embedding 管线 | 一个 Git 仓库 + LLM API |
+| 适用规模 | 数千篇以上 | 中等规模（约 100~500 篇） |
+| 可解释性 | 检索片段不连贯 | 每个结论可追溯到 wiki 页面和原始来源 |
 
-本项目目标是构建一个**内部知识问答 Agent**,通过飞书机器人接入,让员工和合格投资者通过自然语言提问即可获得带引用的准确回答。
+### 为什么这个项目适合 LLM Wiki
 
-### 1.2 核心需求
-
-- **文档来源**:飞书团队空间(Wiki + 云文档 + 多维表格)
-- **交付渠道**:飞书机器人(单聊 + 群聊 @)
-- **合规要求**
-  - 涉及私募产品具体信息(净值、收益、持仓)必须校验合格投资者身份
-  - 文档权限透传(用户在飞书无权限的文档,Agent 也不能返回其内容)
-  - 所有对话留痕 5 年以上,支持监管追溯
-  - 输出内容不能包含"保本""稳赚""零风险"等违规表述
-- **质量要求**
-  - 回答必须基于知识库,不得幻觉编造
-  - 每个关键结论必须有引用来源(文档名称 + 路径)
-
-### 1.3 非目标(MVP 不做)
-
-- 不做面向外部客户的 C 端问答(仅限内部员工与已认证合格投资者)
-- 不做交易执行、订单下单等"写操作"
-- 不做语音、图表生成等多模态输出(后续迭代)
-- 不做多 Agent 协作(MVP 单 Agent 完成闭环)
+- **规模匹配**：100 篇文档正好在 LLM Wiki 的甜蜜区
+- **更新频率适中**：内部文档不是每分钟都在变，适合"编译"模式
+- **追溯性要求高**：内部知识库需要让用户看到答案的依据
+- **工程成本低**：不需要专门的 ML 团队维护向量管线
 
 ---
 
-## 2. 整体架构
+## 二、核心架构
 
-### 2.1 架构图
+### 整体三层架构
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         飞书客户端                                │
-│  (用户在群聊/单聊 @机器人 提问,接收带引用的回答卡片)              │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│           飞书开放平台 (事件订阅 / 长连接 WebSocket)               │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-         ┌───────────────────┴───────────────────┐
-         ▼                                       ▼
-┌──────────────────┐                  ┌──────────────────────┐
-│  bot_service     │                  │  sync_service        │
-│  (TS/NestJS)     │                  │  (Python)            │
-│                  │                  │                      │
-│ · 接收消息事件    │                  │ · 监听文档变更事件    │
-│ · 权限校验        │◄─────HTTP──────►│ · 拉取 Wiki/Docx     │
-│ · 消息卡片渲染    │                  │ · Block→Markdown     │
-│ · 会话管理        │                  │ · 分块 + Embedding   │
-└────────┬─────────┘                  └──────────┬───────────┘
-         │                                       │
-         │ HTTP (问答请求)                        │
-         ▼                                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    rag_service (Python/FastAPI)                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  Retriever  │  │   Reranker  │  │   Agent Orchestrator    │  │
-│  │  BM25+向量  │─►│ bge-rerank  │─►│  (合规校验+LLM调用)      │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└──────┬────────────────────┬──────────────────────┬─────────────┘
-       │                    │                      │
-       ▼                    ▼                      ▼
-┌─────────────┐      ┌─────────────┐       ┌────────────────┐
-│   Qdrant    │      │ PostgreSQL  │       │   LLM API      │
-│  (向量库)   │      │  (元数据/   │       │  (通义/Claude) │
-│             │      │   权限/日志) │       │                │
-└─────────────┘      └─────────────┘       └────────────────┘
-
---- 独立定时推送 ---
-
-                                    ┌──────────────────────┐
-                                    │ scheduler_service    │
-                                    │  (Python)            │
-                                    │                      │
-  ┌─────────────┐                   │ · APScheduler 定时   │────► 飞书
-  │   Qdrant    │◄─── REST 查询 ────│ · 构建每日摘要        │   Open API
-  │  (向量库)   │                   │ · MiniMax LLM 生成   │
-  └─────────────┘                   └──────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Layer 3 — Schema 层(规则配置)                       │
+│  CLAUDE.md / AGENTS.md                               │
+│  告诉 LLM 如何摄入、查询、维护                       │
+└──────────────────────┬───────────────────────────────┘
+                       ↓
+┌──────────────────────────────────────────────────────┐
+│  Layer 2 — Wiki 层(LLM 全权管理)                     │
+│  ┌─────────────┐ ┌──────────┐ ┌──────────┐           │
+│  │ 实体/概念页 │ │ index.md │ │ log.md   │           │
+│  │ 带反向链接  │ │ 全局索引 │ │ 时间日志 │           │
+│  └─────────────┘ └──────────┘ └──────────┘           │
+└──────────────────────┬───────────────────────────────┘
+                       ↓
+┌──────────────────────────────────────────────────────┐
+│  Layer 1 — Raw 层(只读事实源)                        │
+│  飞书文档 · Excel 表 · PDF · 会议纪要                │
+└──────────────────────────────────────────────────────┘
 ```
 
-### 2.2 一次问答的调用链路
+### 三个核心操作
 
-```
-用户 @机器人 提问 ("X基金最新净值是多少")
-        │
-        ▼
-  bot_service 接收事件 (取出 user_open_id + 问题)
-        │
-        ▼
-  合规意图分类 (包含"净值" → 需合格投资者)
-        │
-        ├── 未认证 ──► 返回合规话术 + 审计
-        │
-        └── 已认证 ──► 查 PG 拿到可访问文档列表
-                        │
-                        ▼
-                Qdrant 带权限 filter 检索 (向量 + doc_id filter, top 8)
-                        │
-                        ▼
-                LLM 生成答案 (通义千问 + 引用来源)
-                        │
-                        ▼
-                输出合规扫描 (屏蔽违禁词 + 加风险提示)
-                        │
-                        ▼
-                消息卡片返回飞书 (答案 + 引用按钮 + 审计落库)
-```
-
-### 2.3 分层说明
-
-| 层级 | 组件 | 职责 |
-|------|------|------|
-| 接入层 | 飞书开放平台 | 事件订阅、消息下发、文档 API |
-| 网关/机器人层 | bot_service | 飞书事件解析、卡片渲染、会话管理 |
-| Agent 服务层 | rag_service | 合规校验、检索、LLM 编排、审计 |
-| 数据同步层 | sync_service | 文档拉取、解析、向量化入库 |
-| 存储层 | Qdrant / PostgreSQL / Redis | 向量、元数据、缓存 |
-| 模型层 | 通义 / Claude / Embedding API | LLM 推理、向量化 |
+| 操作 | 触发方 | 说明 |
+|------|--------|------|
+| **ingest** | 管理员上传 / 定时同步 | LLM 阅读原文 → 提取实体/概念 → 创建/更新 wiki 页面 → 更新 index.md |
+| **query** | 用户提问 | LLM 读 index.md 找相关页面 → 深读 → 综合回答 → 好答案归档为新页面 |
+| **lint** | 定时任务 | LLM 检查矛盾、断链、孤立页面、知识空白 |
 
 ---
 
-## 3. 技术选型
+## 三、云端架构详解
 
-### 3.1 语言与框架
-
-| 服务 | 语言 | 框架 | 选型理由 |
-|------|------|------|---------|
-| bot_service | TypeScript | NestJS + `@larksuiteoapi/node-sdk` | 飞书 Node SDK 最成熟,事件订阅和卡片交互开发效率高 |
-| rag_service | Python 3.11 | FastAPI | RAG 生态 Python 最强,FastAPI 性能和开发效率兼备 |
-| sync_service | Python 3.11 | FastAPI + `lark-oapi` | 文档解析生态 Python 压倒性优势 |
-
-**为什么混合架构,不选单一语言?**
-
-知识库核心能力(文档解析、Embedding、向量检索、LLM 编排)在 Python 生态有碾压性优势:LlamaIndex、LangGraph、Unstructured、FlagEmbedding、rank-bm25 等关键库都是 Python 一等公民。飞书侧的事件订阅、卡片交互用 TS 更简洁,前端工程师也能协作。两者通过 HTTP/gRPC 解耦,后续可独立扩展。
-
-### 3.2 存储
-
-| 组件 | 选型 | 用途 | 备选方案 |
-|------|------|------|---------|
-| 向量库 | Qdrant | Embedding 存储、向量检索、payload 过滤 | Milvus(规模大时) / PGVector(规模小时) |
-| 关系库 | PostgreSQL 16 | 文档元数据、权限、审计日志 | MySQL(次选) |
-| 缓存 | Redis 7 | 会话状态、限流、token 缓存 | - |
-| 对象存储 | OSS / MinIO(可选) | 原始文档镜像、图片 | - |
-
-**为什么 Qdrant 而非 Milvus?**
-
-MVP 阶段 Qdrant 部署更轻(单二进制即可),Rust 编写性能好;payload filter 能力强,天然支持按 document_id 做权限过滤;规模到亿级向量时再考虑迁移 Milvus。
-
-### 3.3 LLM 与 Embedding
-
-| 能力 | 首选 | 备选 | 说明 |
-|------|------|------|------|
-| LLM(对话) | 通义千问 Qwen-Max | Claude Sonnet / DeepSeek | 数据不出境,金融场景合规;中文表现好 |
-| Embedding | 通义 text-embedding-v3 (1024维) | bge-m3(自部署) | 部署成本低;如要自主可控可换 bge-m3 |
-| Reranker | bge-reranker-v2-m3(自部署) | 通义 rerank API | 提升 Top-K 精排效果,尤其对中文长文本 |
-
-**双模型策略(后续迭代)**:对外问答用国产模型(数据不出境),复杂推理、代码生成用 Claude(走合规的 API 代理)。
-
-### 3.4 Agent 编排
-
-MVP 阶段采用**手写 Python 工作流**(`app/agent/workflow.py`),状态少、逻辑清晰,便于审计。
-
-未来升级选项:涉及多轮澄清、工具调用、多 Agent 协作时升级到 **LangGraph**;如需让业务同学低代码配置工作流,可引入 **Dify / Coze**。
-
-### 3.5 可观测性(后续迭代)
-
-- Trace:Langfuse 或 Phoenix,记录每次 LLM 调用的 prompt/response/延迟
-- Metrics:Prometheus + Grafana(服务延迟、QPS、错误率)
-- 日志:ELK / Loki(结构化日志聚合)
-
----
-
-## 4. 服务职责划分
-
-### 4.1 bot_service(TypeScript / NestJS)
-
-**核心职责**
-- 接收飞书事件(p2p 消息、群 @ 消息、卡片交互回调)
-- 用户身份识别(open_id / union_id)
-- 调用 rag_service 的 `/chat` 接口
-- 渲染飞书消息卡片(答案 + 引用来源 + 交互按钮)
-- 会话上下文管理(多轮对话)
-
-**不做的事**
-- 不做文档解析、向量化
-- 不直接调用 LLM
-- 不做权限配置管理(权限配置由飞书原生 + sync 服务维护)
-
-### 4.2 rag_service(Python / FastAPI)
-
-**核心职责**
-- `/chat`:Agent 主工作流入口
-- `/search`:纯检索接口(测试用)
-- `/health`:健康检查
-- 合规校验(意图识别、合格投资者校验、输出扫描)
-- 混合检索(向量 + BM25)+ Rerank
-- LLM 调用 + Prompt 组装
-- 审计日志写入
-
-### 4.3 sync_service(Python)
-
-**核心职责**
-- 定时全量同步(首次 & 兜底)
-- 订阅飞书文档变更事件(`drive.file.edit_v1` 等),实时增量更新
-- 拉取 Wiki 节点树 / docx blocks
-- Block 树转 Markdown
-- 分块 + Embedding + 写 Qdrant
-- 写入文档元数据与权限列表到 PostgreSQL
-
-**关键设计**:与 rag_service 解耦——同步负载(尤其是大批量首次同步)不影响在线问答性能;基于 `document_id + seq` 生成确定性 chunk ID,多次同步结果一致。
-
-### 4.4 scheduler_service(Python)
-
-**核心职责**
-- 定时推送:每日收盘后（默认 15:30）获取当日行情数据和产品净值，组合渲染后推送给指定用户
-- 数据来源:AKShare 获取指数行情（上证/创业板/科创50/沪深300）+ 飞书多维表格「产品表-同步」获取产品结构数据
-- 独立部署:与 rag_service/bot_service 完全解耦，可单独部署在低资源配置机器上
-- 轻量化:无本地 Embedding/ML 模型，纯 HTTP API 调用
-
-**推送内容**
-- 指数行情:上证指数、创业板指、科创50、沪深300 等的收盘价、涨跌额、涨跌幅
-- 产品净值:雪球结构产品的入场价、敲出点位、月票息、降落伞等核心参数
-
-**不做的事**
-- 不做实时问答（由 bot_service + rag_service 负责）
-- 不做文档同步（由 sync_service 负责）
-- 不依赖 Qdrant / PostgreSQL / 本地 ML 模型
-
-**与 rag_service 的区别**
-
-| | scheduler_service | rag_service |
-|--|------------------|--------------|
-| 触发方式 | APScheduler 定时（收盘后） | 飞书消息事件 |
-| 数据来源 | AKShare + 飞书 Bitable | Qdrant 向量检索 |
-| 内存占用 | ~200-300MB | ~1.5-2GB（含 Embedding 模型） |
-| 部署位置 | 2u4g 低配机器 | 需要更大内存 |
-
-**关键设计**:采用 AKShare 获取公开市场数据 + 飞书 Bitable API 查询产品数据，无需本地模型，极低内存占用，2u4g VPS 可正常运行。
-
----
-
-## 5. 核心数据流
-
-### 5.1 文档同步流程
+### 整体架构图
 
 ```
-sync_service 启动
-    │
-    ▼
-全量拉取:list_wiki_spaces → walk_wiki_tree
-    │
-    ▼
-遍历每个节点(docx/sheet/bitable)
-    │
-    ▼
-拉取 blocks (get_docx_blocks)
-    │
-    ▼
-Block 树 → Markdown (blocks_to_markdown)
-    │
-    ▼
-按标题 + token 混合分块 (split_markdown)
-    │
-    ▼
-批量 Embedding (embed_texts)
-    │
-    ▼
-delete_document(旧 chunks) → upsert_chunks(新 chunks) to Qdrant
-    │
-    ▼
-upsert_document 写 PG 元数据
-    │
-    ▼
-set_document_permissions 写权限表
-
---- 增量同步 ---
-飞书 Webhook:drive.file.edit_v1
-    │
-    ▼
-bot_service 转发事件到 sync_service
-    │
-    ▼
-sync_docx(document_id)  # 复用同一 pipeline
+┌─────────────────────────────────────────────────────────┐
+│  用户层                                                 │
+│  浏览器 / 飞书机器人 / 管理员后台                       │
+└────────────────────────┬────────────────────────────────┘
+                         ↓ HTTPS
+┌─────────────────────────────────────────────────────────┐
+│  应用层(ECS)                                            │
+│  Web 前端 ──→ API 服务 ──→ Wiki Agent                   │
+└────────────────────────┬────────────────────────────────┘
+                         ↓
+┌──────────────────────┐ ┌────────────────────────────────┐
+│  数据层              │ │  外部服务                      │
+│  Wiki Git 仓库       │ │  飞书 API(同步源文档)          │
+│  PostgreSQL(运营)    │ │  Claude / DeepSeek API(推理)   │
+└──────────────────────┘ └────────────────────────────────┘
 ```
 
-### 5.2 问答的完整八步流程
+### 各模块职责说明
 
-1. **合规意图分类**:question 含"净值/持仓/收益率"等敏感词 → 需合格投资者
-2. **权限拉取**:查 PG,拿到该用户可访问的 document_id 列表
-3. **向量化**:embed_query(question) → 1024 维向量
-4. **检索**:Qdrant 带权限 filter 检索(MatchAny on document_id),top_k=8
-5. **精排**:(MVP 暂未启用)Reranker 取 top_k=4
-6. **生成**:组装 Prompt(system + 参考资料 + 历史对话 + 问题)→ LLM
-7. **合规扫描**:屏蔽违规词 + 追加风险提示 + 提取引用来源
-8. **审计**:写 chat_logs(session_id / user / Q / A / chunks / citations / latency)
+#### 用户层
 
-### 5.3 关键延迟预算(MVP 目标)
+| 入口 | 适用场景 | 实现方式 |
+|------|----------|----------|
+| Web 浏览器 | 主要使用场景，问答 + 浏览 wiki | 前端 SPA |
+| 飞书机器人 | 群聊里 @ 机器人快速提问 | 飞书开放平台 webhook |
+| 管理员后台 | 上传文档、审核内容、查看统计 | 同前端,带角色路由 |
 
-| 阶段 | 目标延迟 | 备注 |
-|------|---------|------|
-| bot_service 事件接收到转发 | < 50ms | |
-| 合规意图分类 | < 10ms | 正则匹配 |
-| PG 权限查询 | < 30ms | 加索引 |
-| Embedding(单条) | < 200ms | 通义 API |
-| Qdrant 检索 | < 100ms | MVP 数据量 |
-| LLM 生成(首 token) | < 1.5s | Qwen-Max |
-| LLM 生成(完整) | < 5s | 500 token 输出 |
-| **端到端 P95** | **< 6s** | |
+#### 应用层
+
+| 服务 | 技术选型推荐 | 部署位置 |
+|------|--------------|----------|
+| Web 前端 | Next.js / Nuxt | ECS(Nginx 托管) |
+| API 服务 | FastAPI(Python)或 NestJS(Node) | ECS |
+| Wiki Agent | Python 脚本 + Claude SDK | ECS,常驻进程或定时任务 |
+
+**Wiki Agent 核心职责**:
+- 接收 ingest 任务,调用 LLM 处理新文档,把结果写回 Git
+- 接收 query 任务,调用 LLM 综合答案,记录到问答历史
+- 定时跑 lint 任务,生成健康检查报告
+- 对接飞书 API,定时同步源文档到 raw/
+
+#### 数据层
+
+**Wiki Git 仓库**(挂载在 ECS 数据盘)
+
+```
+wiki-repo/
+├── raw/                    # 原始文档(只读)
+│   ├── articles/
+│   ├── pdfs/
+│   └── meeting-notes/
+├── wiki/                   # LLM 生成的 markdown
+│   ├── index.md            # 全局目录
+│   ├── log.md              # 时间日志
+│   ├── entities/           # 实体页(产品、客户、人员)
+│   ├── concepts/           # 概念页(术语、流程、政策)
+│   └── overviews/          # 综合页(月报、主题汇总)
+├── CLAUDE.md               # Schema 配置
+└── .git/
+```
+
+每次 LLM 修改 wiki 自动 `git commit`,完整版本历史白送。
+
+**PostgreSQL**(运营数据)
+
+```sql
+-- 用户表
+users (id, email, role, dept, created_at)
+
+-- 问答历史
+queries (id, user_id, question, answer, sources, feedback, created_at)
+
+-- 文档同步状态
+documents (id, source_url, last_synced, ingested_at, version)
+
+-- 权限规则
+access_rules (page_path, required_role, dept_restriction)
+```
 
 ---
 
-## 6. 数据模型
+## 四、关键设计决策
 
-### 6.1 PostgreSQL 表结构
+### 1. 权限分级
 
-#### `documents` - 文档元数据
+**为什么需要**:内部知识库通常涉及敏感内容(薪酬、客户、战略)。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | SERIAL PK | 自增 ID |
-| document_id | VARCHAR(64) UNIQUE | 飞书 document_id / node_token |
-| space_id | VARCHAR(64) | 飞书知识空间 ID |
-| obj_type | VARCHAR(32) | docx / sheet / bitable / wiki |
-| title | TEXT | 文档标题 |
-| path | TEXT | 在知识空间中的路径 |
-| content_md | TEXT | 转换后的 Markdown 全文(截断 50KB) |
-| owner_id | VARCHAR(64) | 文档所有者 open_id |
-| last_edit_time | TIMESTAMP | 最后编辑时间 |
-| synced_at | TIMESTAMP | 上次同步时间 |
-| chunk_count | INT | 切分后的 chunk 数 |
-| status | VARCHAR(16) | active / deleted |
+**建议三级模型**:
 
-索引:space_id、status
+| 级别 | 可见范围 | 典型内容 |
+|------|----------|----------|
+| public | 全员 | 产品文档、规章制度、常识问答 |
+| dept-* | 部门内 | 销售话术、技术方案、内部 SOP |
+| admin | 少数人 | 财务数据、薪酬结构、战略规划 |
 
-#### `document_permissions` - 文档权限
+**实现方式**:每篇 wiki 页面 frontmatter 标注访问级别:
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| document_id | VARCHAR(64) | 关联 documents |
-| principal_type | VARCHAR(16) | user / department / tenant |
-| principal_id | VARCHAR(64) | 对应的 open_id / department_id |
-| perm | VARCHAR(16) | read / edit |
+```yaml
+---
+title: Q3 销售目标
+access: dept-sales
+created: 2026-04-01
+sources: [飞书文档/2026Q3规划.docx]
+---
+```
 
-复合唯一约束:`(document_id, principal_type, principal_id)`
-索引:document_id、(principal_type, principal_id)
+API 查询时按用户角色过滤,LLM 阅读时也只能访问授权页面。
 
-#### `chat_logs` - 对话审计(合规要求)
+### 2. 摄入策略
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | BIGSERIAL PK | |
-| session_id | VARCHAR(64) | 会话 ID |
-| user_open_id | VARCHAR(64) | 用户 |
-| user_name | VARCHAR(128) | 用户名(冗余方便审计) |
-| question | TEXT | 问题 |
-| answer | TEXT | 完整回答 |
-| retrieved_chunks | JSONB | 检索命中的 chunks(用于追溯) |
-| citations | JSONB | 实际引用的文档 |
-| latency_ms | INT | 响应延迟 |
-| llm_model | VARCHAR(64) | 使用的模型名 |
-| created_at | TIMESTAMP | |
+**100 篇文档建议先手动**:管理员后台上传 → 触发 ingest 任务。
 
-索引:user_open_id、created_at
+**为什么不一开始就自动**:
+- 自动同步会把噪音文档(草稿、临时记录)吸进来,污染知识库
+- 人工策展是 LLM Wiki 的核心理念 — 人决定什么进知识库,LLM 负责整理
+- 流程跑顺后再加自动化
 
-#### `qualified_investors` - 合格投资者白名单
+**第二阶段加自动同步**:
+- 飞书文档:用 Open API 定时拉取(每天凌晨)
+- 文档变更:对比 hash,变了就触发增量 ingest
+- 新建文档:管理员审核通过后才入库
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| user_open_id | VARCHAR(64) PK | 飞书 open_id |
-| name | VARCHAR(128) | 姓名 |
-| verified_at | TIMESTAMP | 认证时间 |
-| expire_at | TIMESTAMP | 过期时间(NULL 表示永不过期) |
-| level | VARCHAR(16) | standard / professional |
+### 3. 查询返回结构
 
-### 6.2 Qdrant Collection 结构
-
-- Collection 名:`pe_kb_chunks`
-- 向量维度:1024(通义 text-embedding-v3)
-- 距离度量:Cosine
-
-Payload schema(每个 chunk 的元数据):
+**不要只返回一段话答案**。学 NotebookLM 的设计:
 
 ```json
 {
-  "document_id": "doccnxxxxx",
-  "seq": 3,
-  "content": "原始文本内容...",
-  "headings": ["私募产品手册", "A 基金", "申购流程"],
-  "title": "A 基金产品手册",
-  "space_id": "7xxxxxx",
-  "path": "产品库/私募/A 基金产品手册"
+  "answer": "Q3 华东区销售目标是 2400 万,比 Q2 增长 15%...",
+  "wiki_pages": [
+    {"title": "Q3 销售目标", "url": "/wiki/entities/q3-sales-goal"},
+    {"title": "华东区运营", "url": "/wiki/entities/east-china"}
+  ],
+  "raw_sources": [
+    {"title": "2026Q3规划.docx", "url": "feishu://docs/xxx"}
+  ],
+  "confidence": "high"
 }
 ```
 
-Payload 索引:document_id(keyword)、allowed_users(keyword,后续启用)
+**好处**:
+- 用户能追溯到原文,信任度高
+- 答案不对时一键查原文
+- 引用的 wiki 页面可以直接展开看
+
+### 4. 是否需要向量检索兜底
+
+**100 篇规模**:不需要。LLM 直接读 index.md(几千 token)就能找到相关页面。
+
+**500 篇以上**:建议加一层向量检索作为**召回层**,给 LLM 缩小阅读范围。这是 LLM Wiki 和 RAG 的混合,工程上叫 "agentic RAG"。
 
 ---
 
-## 7. 关键设计决策
+## 五、阿里云资源配置
 
-### 7.1 权限透传:金融场景核心
+### 资源清单(按量付费)
 
-**问题**:用户 A 在飞书对文档 X 无权限,Agent 不能把 X 的内容回答给 A,否则就是严重的数据泄露事故。
+| 资源 | 规格 | 月费用 | 备注 |
+|------|------|--------|------|
+| ECS | 2核4G, Ubuntu 24 | ¥80~120 | 应用 + Agent 共用 |
+| 数据盘 ESSD | 40G | ¥20 | Git 仓库 + 日志 |
+| RDS PostgreSQL | 1核1G(最低配) | ¥60 | 可选,自建可省 |
+| EIP | 5Mbps 按流量 | ¥30~50 | 视访问量 |
+| 域名 | .com | ¥60/年 | 摊到月约 5 元 |
+| HTTPS 证书 | Let's Encrypt | 免费 | |
+| **基础设施小计** | | **约 ¥200/月** | |
 
-**方案(MVP)**
+### LLM API 费用估算
 
-sync_service 同步文档时,调用飞书 `drive.permission.member.list` 接口拉取文档的可访问成员,写入 document_permissions 表。rag_service 问答时,先查 PG 拿到该用户可访问的 document_id 列表,在 Qdrant 检索时用 MatchAny filter 过滤,只返回有权限的 chunks。
+| 用量 | 单次成本 | 月度估算 |
+|------|----------|----------|
+| 100 篇文档初次摄入 | 约 ¥30~50 | 一次性 |
+| 单次 query(含读 index + 深读) | 约 ¥0.3~0.8 | - |
+| 每天 100 次查询(30 人团队) | - | 约 ¥100~200 |
+| 每周 lint 健康检查 | 约 ¥20 | 约 ¥80 |
+| **LLM 调用小计** | | **约 ¥200~300/月** |
 
-**为什么不用 Qdrant 的 payload 存 allowed_users 数组?**
+**成本优化方案**:
+- 用 DeepSeek 替代 Claude:成本降到 1/5
+- 简单问题用便宜模型(Haiku),复杂问题用 Opus
+- 缓存常见问题答案,避免重复调用
+- 优化 prompt 长度,index.md 控制在 3000 字以内
 
-文档权限变更频繁时,Qdrant 的全量 payload 更新开销大;PG 作为权限 Source of Truth 更清晰,利于审计。
+### 总月度成本
 
-**生产环境建议**
-
-回答前二次校验:用用户 token 调用飞书 API 确认权限(而非只信任缓存)。敏感文档增加"原文快照"留痕,避免文档删除后无法追溯。
-
-### 7.2 合规前置 (Compliance-First)
-
-**问题**:涉及"净值/持仓/收益率"等问题,监管要求只能回答合格投资者。如果等 LLM 生成后再判断,既浪费 token,又可能泄露信息片段。
-
-**方案**
-
-在检索和 LLM 调用**之前**做意图分类;未认证用户直接返回标准拒答话术,不进入 RAG 流程;所有被拦截的请求也要落审计日志。
-
-### 7.3 输出合规扫描
-
-**问题**:LLM 可能被 prompt 诱导或基于资料生成"保本""稳赚"等违规表述。
-
-**方案**
-
-关键词正则扫描(MVP);未来升级为小模型分类器(基于标注数据微调);触发后标记输出 + 告警 + 留痕,人工 review。
-
-### 7.4 引用可追溯
-
-**问题**:金融场景必须能追溯"这个答案是基于哪份文档的哪一段生成的"。
-
-**方案**
-
-每个 chunk 的 payload 带完整元数据(document_id + seq + headings + title);LLM prompt 中显式要求标注引用;审计表 retrieved_chunks 字段完整记录检索上下文(不仅是最终引用);飞书消息卡片展示引用来源,点击可跳转原文档。
-
-### 7.5 分块策略
-
-**问题**:飞书文档是 block 结构,不是纯文本。如果直接按固定 token 切,会破坏语义。
-
-**方案**(见 `chunker.py`)
-
-先按标题边界切(H1/H2/H3);单个 section 超过 chunk_size(500 tokens)时按滑窗(overlap=80)再切;每个 chunk 保留**标题面包屑**(例如:`产品库 > A 基金 > 申购流程`),在 Embedding 时作为前缀拼接;表格单独抽取为结构化数据(MVP 占位,后续完善);图片走 OCR 或 VLM 生成描述(后续)。
-
-### 7.6 同步增量化
-
-**问题**:全量扫描所有 Wiki 节点慢且受 API 限频。
-
-**方案**
-
-首次全量同步;之后订阅 `drive.file.edit_v1` 事件,文档变更实时推送;定时(每天凌晨)跑一次全量兜底,防止事件丢失。
+| 团队规模 | 基础设施 | LLM API | 总计 |
+|----------|----------|---------|------|
+| 10 人轻度使用 | ¥200 | ¥100 | **¥300/月** |
+| 30 人中度使用 | ¥200 | ¥300 | **¥500/月** |
+| 50+ 人重度使用 | ¥400 | ¥600 | **¥1000/月** |
 
 ---
 
-## 8. 项目目录结构
+## 六、上线路径
 
-```
-pe-kb-mvp/
-├── docker-compose.yml              # 一键启动 Qdrant / PG / Redis
-├── .env.example                    # 环境变量模板
-├── requirements.txt                # Python 依赖
-├── ARCHITECTURE.md                 # 本文档
-├── README.md                       # 快速开始
-│
-├── scripts/
-│   └── init.sql                    # PG 建表脚本
-│
-├── rag_service/                    # Agent + RAG 核心服务 (Python)
-│   ├── __init__.py
-│   ├── config.py                   # 环境变量配置
-│   │
-│   ├── feishu/                     # 飞书 API 封装
-│   │   ├── client.py               # tenant_access_token + wiki + docx API
-│   │   ├── block_parser.py         # block 树 → Markdown 解析器
-│   │   ├── auth_tool.py            # OAuth 令牌管理
-│   │   ├── auth_server.py          # OAuth 授权服务
-│   │   ├── oauth.py                # OAuth 封装
-│   │   └── user_client.py          # 用户级 API 客户端
-│   │
-│   ├── rag/                        # RAG 核心
-│   │   ├── chunker.py              # 标题 + token 混合分块
-│   │   ├── embedder.py             # bge-m3 Embedding 封装
-│   │   └── vector_store.py         # Qdrant 封装(含权限 filter)
-│   │
-│   ├── agent/                      # Agent 编排 (Step 7 完成)
-│   │   ├── rag_agent.py            # RAG 主 Agent
-│   │   ├── api.py                  # FastAPI 入口
-│   │   ├── models.py               # Pydantic 数据模型
-│   │   ├── llm.py                  # LLM 调用
-│   │   └── compliance.py           # 合规校验
-│   │
-│   ├── models/
-│   │   └── db.py                   # PG 操作
-│   │
-│   └── sync/
-│       └── pipeline.py             # full_sync / sync_folder 命令
-│
-├── tests/                          # 测试套件
-│   ├── step2_test_cases.json
-│   ├── step4_smoke.py
-│   ├── step5_*.py
-│   ├── step6_*.py
-│   ├── step7_api_contract.py       # Step 7 API 测试 (14 passed)
-│   └── step7_chaos.py
-│
-├── sync_service/                   # (待补) 独立部署的同步服务
-│
-├── scheduler_service/             # 独立定时推送服务 (Python)
-│   ├── .env.example                # 环境变量模板
-│   ├── docker-compose.yml         # Docker 部署配置
-│   ├── Dockerfile
-│   ├── requirements.txt           # 最小依赖（akshare + lark-oapi + httpx 等）
-│   └── src/
-│       ├── config.py               # 环境变量配置
-│       ├── sender.py               # 飞书消息发送
-│       ├── market_data.py          # AKShare 指数行情获取
-│       ├── feishu_bitable.py       # 飞书多维表格查询
-│       ├── scheduler.py            # APScheduler 入口
-│       └── jobs/
-│           ├── daily_report.py     # 每日推送任务
-│           └── report_builder.py   # 报告内容构建 + 敲出点位计算
-│
-└── bot_service/                    # 飞书机器人 (TypeScript / NestJS)
-    └── src/                        # (待补)
-        ├── main.ts
-        ├── event-handler.ts        # 飞书事件接收
-        ├── card-renderer.ts        # 消息卡片渲染
-        └── rag-client.ts           # 调用 rag_service
-```
+### Phase 1(2 周)— 内部 MVP
 
-### 8.1 已实现模块清单
+**目标**:验证 LLM Wiki 生成的内容质量是否达标
 
-| 模块 | 文件 | 状态 | 说明 |
-|------|------|------|------|
-| Docker 基础设施 | docker-compose.yml、scripts/init.sql | ✅ | Qdrant + PG + Redis,含建表 SQL |
-| 配置管理 | rag_service/config.py、.env.example | ✅ | 环境变量统一配置 |
-| 飞书客户端 | feishu/client.py | ✅ | token 自动刷新 + wiki + docx API |
-| Block 解析 | feishu/block_parser.py | ✅ | 处理标题/列表/代码/引用/表格(表格简化版) |
-| 分块器 | rag/chunker.py | ✅ | 标题 + token 混合分块,带 heading 面包屑 |
-| Embedding | rag/embedder.py | ✅ | 通义 text-embedding-v3 |
-| 向量库 | rag/vector_store.py | ✅ | Qdrant 封装,支持权限 filter |
-| 合规 | agent/compliance.py | ✅ | 关键词拦截 + 合格投资者判断 + 风险提示 |
-| LLM 调用 | agent/llm.py | ✅ | 通义千问 + 金融 system prompt |
-| 主工作流 | agent/workflow.py | ✅ | 完整 8 步闭环 |
-| 数据访问 | models/db.py | ✅ | 文档 / 权限 / 审计 / 合格投资者 |
-| 同步 Pipeline | sync/pipeline.py | ✅ | full_sync + sync_doc 命令 |
-| FastAPI 接口 | agent/api.py、agent/models.py | ✅ | POST /api/v1/chat、/api/v1/search、/api/v1/health (Step 7 完成) |
-| 飞书机器人 | bot_service/src/* | ✅ | 事件接收 + 卡片渲染 + 调用 RAG (Step 8 完成) |
-| 定时推送服务 | scheduler_service/* | ✅ | 每日收盘推送（AKShare 行情 + 飞书 Bitable 产品数据 + 敲出点位计算），2u4g 可部署 |
+**任务**:
+- [ ] 本地把 LLM Wiki 跑通(Claude Code + Obsidian)
+- [ ] 选 10 篇代表性文档手动 ingest,检查输出
+- [ ] 部署到 ECS,域名解析,HTTPS
+- [ ] 实现最简单的登录 + 问答页面
+- [ ] 邀请 3~5 个种子用户试用,收集反馈
+
+**关键指标**:种子用户提的 10 个问题里,LLM Wiki 能答对几个?
+
+### Phase 2(1 个月)— 内部产品化
+
+**目标**:让 30 人团队都能自助使用
+
+**任务**:
+- [ ] 实现三级权限分级
+- [ ] 管理员后台:上传文档、审核、查统计
+- [ ] 问答历史 + 反馈按钮(👍/👎)
+- [ ] 飞书机器人接入(群里 @ 机器人提问)
+- [ ] **飞书 Cron 同步(每天凌晨拉高频空间,详见第七章)**
+- [ ] 100 篇文档全部 ingest 完成
+- [ ] 编写运维文档和 Schema 规范
+
+### Phase 3(持续)— 精细化运营
+
+**任务**:
+- [ ] 每周自动 lint,生成健康报告给管理员
+- [ ] 高频问题答案自动归档为 wiki 新页面(知识复利)
+- [ ] 文档热度监控:哪些被引用多、哪些没人看
+- [ ] **升级到 Celery + Webhook 实时同步(详见第七章)**
+- [ ] 定期 schema 调优(根据使用反馈)
 
 ---
 
-## 9. 部署与启动
+## 七、飞书文档定时同步
 
-### 9.1 环境要求
+定时同步是 LLM Wiki 长期运转的关键。本章描述如何把飞书团队空间的文档自动同步到知识库,保持内容时新。
 
-- Docker + Docker Compose
-- Python 3.11+
-- Node.js 20+(后续 bot_service 需要)
-- 飞书自建应用(拿到 App ID + App Secret)
-- 通义千问 API Key(或其他 LLM 凭证)
+### 同步流程总览
 
-### 9.2 飞书应用权限申请
-
-**自建应用需开通的权限**
-
-- `wiki:wiki:readonly` - 读取知识空间
-- `docx:document:readonly` - 读取文档
-- `drive:drive:readonly` - 读取云空间
-- `drive:file:metadata:read` - 读取文件元信息
-- `drive:permission:member:read` - 读取文档成员权限
-- `im:message.group_at_msg` - 接收群 @
-- `im:message.p2p_msg` - 接收单聊消息
-- `im:message:send_as_bot` - 以机器人身份发消息
-
-**事件订阅**
-
-- `drive.file.edit_v1` - 文档编辑
-- `drive.file.deleted_v1` - 文档删除
-- `im.message.receive_v1` - 收到消息
-
-### 9.3 启动步骤
-
-```bash
-# 1. 克隆项目
-git clone <repo>
-cd pe-kb-mvp
-
-# 2. 配置环境变量
-cp .env.example .env
-vim .env   # 填入 FEISHU_APP_ID / SECRET / DASHSCOPE_API_KEY 等
-
-# 3. 启动基础设施 (Qdrant / PG / Redis)
-docker-compose up -d
-
-# 4. 等待 PG 初始化完成,检查表
-docker exec -it pe-kb-postgres psql -U pekb -d pekb -c "\dt"
-
-# 5. 安装 Python 依赖
-cd rag_service
-pip install -r ../requirements.txt
-
-# 6. 首次全量同步(阻塞执行,看日志)
-python -m app.sync.pipeline full_sync
-
-# 7. 启动 rag_service (待 api/main.py 补完)
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# 8. 启动 bot_service (待补完)
-cd ../bot_service
-npm install
-npm run start:dev
-
-### 9.5 scheduler_service 独立部署 (2u4g 低配机器)
-
-scheduler_service 与主服务完全解耦，可部署在低配 VPS（2u4g）上。
-
-**内存占用对比**
-
-| 服务 | 内存占用 | 说明 |
-|------|---------|------|
-| rag_service（含 BGE 模型） | ~1.5-2GB | 含 sentence-transformers |
-| scheduler_service | ~200-300MB | AKShare + 飞书 API，无本地模型 |
-| Qdrant | 不需要 | 本服务不依赖 Qdrant |
-
-**部署步骤**
-
-```bash
-# 1. 进入 scheduler_service 目录
-cd scheduler_service
-
-# 2. 配置环境变量
-cp .env.example ../.env
-vim ../.env   # 填入飞书配置 + BITABLE_APP_ID + BITABLE_TABLE_ID 等
-
-# 3. 构建并启动 scheduler_service
-docker-compose up -d --build
-
-# 4. 查看日志
-docker logs -f scheduler-service
+```
+飞书团队空间
+    ↓ (定时拉取 / 实时推送)
+飞书 Open API
+    ↓ (对比版本 hash)
+变更检测器
+    ↓ (有变化才触发)
+Ingest 任务队列
+    ↓ (LLM 处理)
+Wiki 仓库更新
+    ↓ (自动 commit)
+Git 历史 + 通知管理员
 ```
 
-**关键配置项**
+### 1. 飞书开放平台权限申请
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| SCHEDULER_TARGET_OPEN_ID | 推送目标用户的飞书 open_id | ou_xxxxxxxxxxxxxxxx |
-| BITABLE_APP_ID | 飞书多维表格的 App Token（从 URL 中获取） | Ray2bF0z2aBy3ps3fZecEobrn7g |
-| BITABLE_TABLE_ID | 多维表格内数据表的 ID | tblAhzosed0LG3SJ |
-| MARKET_INDICES | 追踪的指数（逗号分隔） | 上证指数,创业板指,科创50,沪深300 |
-| SCHEDULER_HOUR / MINUTE | 推送时间（默认 15:30 收盘后） | 15 / 30 |
+去飞书开放平台 `open.feishu.cn` 创建**企业自建应用**(不是机器人)。
 
-**获取 BITABLE_APP_ID 和 BITABLE_TABLE_ID**:打开飞书多维表格，浏览器地址栏 URL 格式为:
-`https://xxx.feishu.cn/base/{BITABLE_APP_ID}?table={BITABLE_TABLE_ID}`
-| SCHEDULER_HOUR | 推送小时（24小时制） | 15 |
-| SCHEDULER_MINUTE | 推送分钟 | 30 |
-| QDRANT_URL | Qdrant 地址（容器内用 host.docker.internal） | http://host.docker.internal:6333 |
+需要申请的权限范围:
 
-**获取用户的 open_id**:可以在飞书开发者后台的「应用调试」中，给机器人发一条消息，API 日志里会显示发送者的 open_id。
+| 权限 | 用途 |
+|------|------|
+| `wiki:wiki:readonly` | 读知识空间列表和节点树 |
+| `docx:document:readonly` | 读新版文档(docx)内容 |
+| `drive:drive:readonly` | 读云空间文件列表 |
+| `sheets:spreadsheet:readonly` | 读 Excel 表格(可选) |
 
-### 9.4 本地测试验证
+申请通过后会拿到 `App ID` 和 `App Secret`,务必存到 ECS 环境变量,**禁止提交到 Git**。
 
-同步完成后,可以直接测试 workflow.run_chat:
+### 2. 同步频率分级策略
+
+不同类型文档变化频率差异很大,建议按重要性和变化频率分级:
+
+| 类型 | 典型内容 | 同步频率 | 触发方式 |
+|------|----------|----------|----------|
+| 高频变化 | 产品文档、SOP、技术方案 | 每天凌晨 1 次 | Cron 定时 |
+| 低频变化 | 规章制度、组织架构、归档资料 | 每周 1 次 | Cron 定时 |
+| 关键文档 | 公告、紧急通知、重大变更 | 实时 | 飞书 Webhook 推送 |
+
+**为什么不全部用实时同步?**
+- Webhook 需要公网可达 + HTTPS,部署成本更高
+- 大部分文档不需要分钟级更新
+- 实时同步会触发频繁的 LLM 调用,成本上升
+
+**为什么不全部用每日 Cron?**
+- 公告类文档可能上午发,下午就要全员知道
+- 每日批量处理时容易触发飞书 API 限流
+
+### 3. Cron 定时任务实现
+
+最简单的方案就是 ECS 上写 Python 脚本 + crontab。
+
+#### 3.1 同步脚本骨架
 
 ```python
-from app.agent.workflow import run_chat
+# /opt/wiki/sync/sync_main.py
+import os
+import sys
+from datetime import datetime
+from feishu_client import FeishuClient
+from db import documents_db
+from agent import trigger_ingest
 
-result = run_chat(
-    user_open_id="ou_test_user_001",
-    user_name="测试用户",
-    question="A 基金的申购流程是什么?",
+def sync_feishu_space(space_id, space_type='high-freq'):
+    client = FeishuClient(
+        app_id=os.getenv('FEISHU_APP_ID'),
+        app_secret=os.getenv('FEISHU_APP_SECRET')
+    )
+
+    # 1. 拉取知识空间所有节点(递归)
+    remote_docs = client.list_wiki_nodes(space_id)
+
+    stats = {'new': 0, 'updated': 0, 'archived': 0, 'failed': 0}
+
+    # 2. 对比本地状态
+    for doc in remote_docs:
+        local = documents_db.get(doc.token)
+
+        try:
+            if not local:
+                # 新文档 → 拉取 + 入库 + 触发 ingest
+                content = client.get_document_content(doc.token)
+                save_to_raw(doc, content)
+                trigger_ingest(doc.token, action='create')
+                stats['new'] += 1
+
+            elif local.last_modified < doc.last_modified:
+                # 时间戳变了 → 拉内容对比 hash,避免无意义 ingest
+                content = client.get_document_content(doc.token)
+                new_hash = md5(content)
+                if new_hash != local.content_hash:
+                    save_to_raw(doc, content)
+                    trigger_ingest(doc.token, action='update')
+                    stats['updated'] += 1
+        except Exception as e:
+            stats['failed'] += 1
+            log_error(doc.token, e)
+
+    # 3. 检测删除(飞书已删的标记为 archived,不真删 wiki 页面)
+    remote_tokens = {d.token for d in remote_docs}
+    for local in documents_db.list_all(space_id=space_id):
+        if local.token not in remote_tokens:
+            trigger_ingest(local.token, action='archive')
+            stats['archived'] += 1
+
+    # 4. 写同步报告
+    write_sync_report(space_id, space_type, stats)
+
+if __name__ == '__main__':
+    space_type = sys.argv[1] if len(sys.argv) > 1 else 'high-freq'
+    spaces = config.get_spaces(space_type)
+    for space in spaces:
+        sync_feishu_space(space.id, space_type)
+```
+
+#### 3.2 Crontab 配置
+
+```bash
+# 在 ECS 上编辑当前用户的定时任务
+crontab -e
+
+# 高频空间:每天凌晨 2 点同步
+0 2 * * * /usr/bin/python3 /opt/wiki/sync/sync_main.py high-freq >> /var/log/wiki-sync-high.log 2>&1
+
+# 低频空间:每周一凌晨 3 点同步
+0 3 * * 1 /usr/bin/python3 /opt/wiki/sync/sync_main.py low-freq >> /var/log/wiki-sync-low.log 2>&1
+
+# 每月 1 号凌晨 4 点跑 lint 健康检查
+0 4 1 * * /usr/bin/python3 /opt/wiki/sync/lint.py >> /var/log/wiki-lint.log 2>&1
+```
+
+**几个细节**:
+- 选凌晨执行,避开飞书 API 限流和 LLM 调用高峰
+- 高频和低频分开时间,避免互相阻塞
+- 日志单独输出,方便排查
+- 时间错开 1 小时,防止任务重叠
+
+#### 3.3 用 Celery 替代 Cron(团队成熟后)
+
+任务量上来后,Cron 缺乏重试、监控、并发控制等能力。建议升级到 Celery + Redis:
+
+```python
+# tasks.py
+from celery import Celery
+from celery.schedules import crontab
+
+app = Celery('wiki', broker='redis://localhost:6379')
+
+@app.task(bind=True, max_retries=3)
+def sync_feishu_doc(self, doc_token):
+    try:
+        client = FeishuClient(...)
+        content = client.get_document_content(doc_token)
+        save_to_raw(doc_token, content)
+        trigger_ingest.delay(doc_token)
+    except Exception as e:
+        # 指数退避重试: 1min → 2min → 4min
+        raise self.retry(exc=e, countdown=2 ** self.request.retries * 60)
+
+# 定时配置
+app.conf.beat_schedule = {
+    'sync-high-freq-daily': {
+        'task': 'tasks.sync_all_spaces',
+        'schedule': crontab(hour=2, minute=0),
+        'kwargs': {'space_type': 'high-freq'}
+    },
+    'sync-low-freq-weekly': {
+        'task': 'tasks.sync_all_spaces',
+        'schedule': crontab(hour=3, minute=0, day_of_week=1),
+        'kwargs': {'space_type': 'low-freq'}
+    },
+}
+```
+
+启动方式:
+
+```bash
+# 启动 worker
+celery -A tasks worker --loglevel=info
+
+# 启动定时调度器
+celery -A tasks beat --loglevel=info
+```
+
+**Celery 比 Cron 的好处**:失败自动重试、任务并行、Web 界面看任务状态(Flower)、支持优先级队列。
+
+### 4. 增量同步策略
+
+#### 文档状态表设计
+
+PostgreSQL 中维护每个文档的同步状态:
+
+```sql
+CREATE TABLE documents (
+    id SERIAL PRIMARY KEY,
+    feishu_token VARCHAR(64) UNIQUE NOT NULL,
+    space_id VARCHAR(64) NOT NULL,
+    title VARCHAR(255),
+    last_modified TIMESTAMP,           -- 飞书侧最后修改时间
+    content_hash VARCHAR(32),          -- 内容 MD5
+    last_ingested_at TIMESTAMP,        -- 最后一次 ingest
+    status VARCHAR(20) DEFAULT 'synced', -- synced/pending/failed/archived
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_space ON documents(space_id);
+CREATE INDEX idx_status ON documents(status);
+```
+
+#### 三种变更场景
+
+| 场景 | 检测方式 | 处理动作 |
+|------|----------|----------|
+| 新文档 | 飞书有,本地无 | 拉内容 → 入 raw/ → 触发 ingest |
+| 已更新 | last_modified 变了且 hash 不同 | 拉内容 → 覆盖 raw/ → 触发 ingest |
+| 已删除 | 飞书 API 找不到了 | 标记 archived,不删 wiki 页面 |
+
+**为什么删除要用软标记?**
+飞书侧的删除可能是误操作,直接删 wiki 页面会丢失历史。标记 archived 后:
+- wiki 页面仍可访问,但加"原文已归档"提示
+- 30 天后管理员审核确认,再决定是否真删
+- Git 历史永久保留,任何时候可恢复
+
+### 5. 飞书 API 调用要点
+
+#### 5.1 Token 缓存
+
+`tenant_access_token` 默认有效期 2 小时,频繁请求会被限流:
+
+```python
+def get_access_token():
+    token = redis.get('feishu:tenant_token')
+    if not token:
+        token = fetch_new_token()
+        # 留 200 秒余量,避免临界过期
+        redis.setex('feishu:tenant_token', 7000, token)
+    return token
+```
+
+#### 5.2 知识空间是树结构
+
+需要递归拉取所有节点:
+
+```python
+def list_wiki_nodes(space_id, parent_token=None):
+    nodes = []
+    page_token = None
+    while True:
+        resp = api.get(
+            f'/wiki/v2/spaces/{space_id}/nodes',
+            params={'parent_node_token': parent_token,
+                    'page_token': page_token}
+        )
+        nodes.extend(resp['items'])
+
+        # 递归子节点
+        for item in resp['items']:
+            if item['has_child']:
+                nodes.extend(list_wiki_nodes(space_id, item['node_token']))
+
+        page_token = resp.get('page_token')
+        if not page_token:
+            break
+    return nodes
+```
+
+#### 5.3 docx 转 markdown
+
+飞书新版文档(docx)是 block 结构,不是 markdown。建议用现成的开源库:
+
+- `feishu2md` (`github.com/Wsine/feishu2md`)
+- `lark-doc-parser` (官方 SDK)
+
+自己写转换器很容易踩各种格式坑(嵌套列表、表格、图片、代码块)。
+
+#### 5.4 频率限制
+
+飞书 API 默认 QPS 限制(一般 50/秒),批量同步要加节流:
+
+```python
+import time
+
+for doc in docs:
+    process(doc)
+    time.sleep(0.05)  # 20 QPS,留余量
+```
+
+### 6. 实时同步(可选,Phase 3)
+
+对公告、紧急通知等高时效内容,用 Webhook 实时推送:
+
+```python
+# FastAPI endpoint
+@app.post('/webhook/feishu')
+async def feishu_webhook(request):
+    # 1. 验证签名
+    if not verify_signature(request):
+        return {'error': 'invalid signature'}
+
+    event = await request.json()
+
+    # 2. 异步触发同步任务
+    if event['type'] == 'docx.document.updated_v1':
+        doc_token = event['data']['document_id']
+        sync_feishu_doc.delay(doc_token)
+
+    return {'code': 0}
+```
+
+**前置条件**:
+- ECS 必须有公网可达的 HTTPS 地址
+- 飞书开放平台后台配置事件订阅 URL
+- 验证签名防止伪造请求
+
+订阅的事件类型:
+
+| 事件 | 用途 |
+|------|------|
+| `docx.document.updated_v1` | 文档内容更新 |
+| `wiki.space.node_changed_v1` | 知识空间节点变化(新增/删除/移动) |
+
+### 7. 同步质量保障
+
+#### 7.1 同步报告
+
+每次同步后生成结构化报告:
+
+```python
+sync_report = {
+    'timestamp': '2026-04-26T02:00:00',
+    'space_id': 'wiki_xxx',
+    'space_type': 'high-freq',
+    'total_docs': 120,
+    'new': 3,
+    'updated': 8,
+    'archived': 1,
+    'failed': 0,
+    'duration_sec': 145,
+    'llm_tokens_used': 35000,
+    'cost_estimate_yuan': 12.5
+}
+```
+
+存入 PostgreSQL,**每周给管理员发邮件汇总**。
+
+#### 7.2 失败分类与处理
+
+| 失败类型 | 处理方式 |
+|----------|----------|
+| 网络超时 | 自动重试 3 次,指数退避 |
+| 权限不足 | 跳过文档,记录日志,通知管理员 |
+| 内容解析失败 | 保留原始 raw 内容,标记 parse_failed,人工介入 |
+| LLM 调用失败 | 进入死信队列,下次同步优先处理 |
+| 飞书 API 限流 | 降速,等待后重试 |
+
+#### 7.3 防止"同步风暴"
+
+如果飞书一次更新了 50 篇文档,不要同时丢 50 个 ingest 任务给 LLM——会触发 API 限流而且费钱:
+
+```python
+# 错误做法:同时触发
+for doc in updated_docs:
+    ingest.delay(doc)  # 50 个任务并发
+
+# 正确做法:串行 + 限速
+from celery import group
+chord = group(
+    ingest.s(doc).set(countdown=i * 30)  # 每 30 秒一个
+    for i, doc in enumerate(updated_docs)
 )
-print(result["answer"])
-print(result["citations"])
+chord.apply_async()
+```
+
+### 8. 同步目录结构建议
+
+```
+/opt/wiki/
+├── sync/
+│   ├── feishu_client.py       # 飞书 API 封装
+│   ├── differ.py              # 变更检测
+│   ├── parser.py              # docx → markdown 转换
+│   └── sync_main.py           # 主同步脚本
+├── tasks/
+│   ├── celery_app.py
+│   ├── ingest.py              # ingest 任务
+│   └── lint.py                # lint 任务
+├── webhook/
+│   └── feishu_webhook.py      # 飞书事件接收(Phase 3)
+├── wiki-repo/                 # Git 仓库(挂数据盘)
+│   ├── raw/
+│   ├── wiki/
+│   └── CLAUDE.md
+├── logs/
+└── .env                       # 凭证(不提交 Git)
+```
+
+### 9. 迭代节奏建议
+
+不要一上来就搞 Celery + Webhook + 实时推送的完整方案,先用最土的 Cron 跑通验证价值:
+
+| 时间 | 任务 |
+|------|------|
+| Week 1 | Cron + Python 脚本跑通最简同步,1 个核心知识空间,每天凌晨拉一次 |
+| Week 2 | 加变更检测(hash 对比),避免重复 ingest 浪费钱 |
+| Week 3-4 | 扩展到所有空间,加监控和报警邮件 |
+| Month 2 | 升级到 Celery,加重试和并发控制 |
+| Month 3+ | 如有实时性需求,加 Webhook 实时同步关键文档 |
+
+**第一步动作**:把"飞书 API 调通拿到一篇文档的 markdown"这个最小动作做完。这步打通了,后面的同步逻辑都是水到渠成的事。
+
+---
+
+## 八、运维与监控
+
+### 必备监控指标
+
+| 指标 | 阈值 | 行动 |
+|------|------|------|
+| 查询响应时间 | P95 < 5s | 超过排查 LLM 调用 |
+| 查询成功率 | > 95% | 低于检查 API 配额 |
+| 用户反馈准确率 | 👍 > 70% | 低于审视 schema 和 ingest 质量 |
+| LLM API 月度消耗 | < 预算 120% | 超过排查异常调用 |
+| 知识库矛盾数(lint) | 月增 < 10 | 超过人工介入 |
+
+### 备份策略
+
+- **Git 仓库**:每日 push 到内部 GitLab 或私有 GitHub 备份
+- **PostgreSQL**:阿里云 RDS 自动每日快照,保留 7 天
+- **原始文档**:OSS 冷备份,长期保存
+
+### 安全要点
+
+- ECS 关闭非必要端口,只开 80/443/22
+- SSH 强制密钥登录,禁用密码
+- API 接口全部经过登录鉴权
+- 飞书 webhook 校验签名
+- 敏感日志脱敏(用户 query 不记录手机号、邮箱等)
+
+---
+
+## 九、常见误区警示
+
+### 1. "先做完美 UI 再上线"
+
+很多团队上来就想做漂亮的产品页,搞精美的图表。结果三个月后发现:**用户不在乎 UI,在乎答案准不准**。
+
+正确做法:Phase 1 用最简陋的 UI,先把"问题 → 准答案"闭环跑通。
+
+### 2. "把所有文档都塞进去"
+
+把过期的、草稿、临时记录全部 ingest,结果 LLM 回答时引用错误信息。
+
+正确做法:**人工策展**。管理员审核每一篇是否值得入库。Karpathy 强调:**人决定来源,LLM 负责记账**。
+
+### 3. "等 LLM 生成完美的页面"
+
+LLM 写的 wiki 页面不会一步到位完美。如果你纠结于"必须每个字都对",会陷入无穷调优。
+
+正确做法:接受 80% 准确度起步,通过用户反馈和 lint 持续改进。
+
+### 4. "只重 ingest 不重 query"
+
+很多人花大力气把文档塞进去,但忽视了查询体验。结果用户问完一次就不来了。
+
+正确做法:**查询是入口**。投入精力优化:答案展示、源文档跳转、反馈机制、追问能力。
+
+### 5. "想用一套系统满足所有人"
+
+技术部门想要技术细节,销售要客户案例,HR 要规章制度。一套通用 wiki 难以满足。
+
+正确做法:**用 schema 区分领域**。可以一个仓库多个子目录,或多个独立 wiki 共享底层架构。
+
+---
+
+## 十、技术栈推荐
+
+### 整体技术栈分层
+
+```
+┌─────────────────────────────────────────────────┐
+│  业务层 — 三大核心模块                          │
+│  飞书登录 · 智能体问答 · 日历模块               │
+├─────────────────────────────────────────────────┤
+│  UI 组件层                                      │
+│  Ant Design Pro 5.x + Ant Design X(AI 组件)     │
+├─────────────────────────────────────────────────┤
+│  框架与状态管理                                 │
+│  Next.js 15 + TanStack Query + Zustand          │
+├─────────────────────────────────────────────────┤
+│  基础设施层                                     │
+│  TypeScript 5 + pnpm + Tailwind CSS             │
+└─────────────────────────────────────────────────┘
+```
+
+### 1. 前端技术栈
+
+#### 1.1 框架层:Next.js 15(App Router)
+
+**为什么不是 Vite + React SPA?**
+
+企业内部系统常被忽略的需求:首屏速度、服务端渲染敏感数据、Streaming UI。Next.js 15 的 App Router + React Server Components 已经成熟,是目前最适合企业级应用的 React 框架。
+
+特别是**智能体问答页**需要流式输出(LLM 一边生成一边显示),Next.js 的 Streaming SSR 和 Server Actions 配合 Vercel AI SDK 能让流式实现非常优雅。
+
+**为什么不是 Vue/Nuxt?**
+
+如果团队是 Vue 背景,Nuxt 3 也没问题。但 React 生态在 AI 应用方向(Vercel AI SDK、LangChain.js、各种 LLM UI 库)领先 Vue 至少一年。新项目用 React 选择更多。
+
+#### 1.2 UI 组件库:Ant Design Pro 5.x + Ant Design X
+
+**为什么不是 shadcn/ui?**
+
+shadcn/ui 在创业项目和 To C 应用上是首选(美观、可定制、社区活跃)。但对企业内部系统:
+
+- **稳定和功能完整优先**:复杂表单、数据表格、权限菜单、国际化这些 shadcn 都得自己拼
+- **Ant Design Pro 自带完整脚手架**:登录页、布局、菜单、面包屑、主题切换、国际化、权限路由全都现成
+- **团队上手快**:国内 90% 的前端工程师都熟悉 Ant Design
+
+**Ant Design X 强烈推荐**(蚂蚁刚出的 AI 应用组件库),专为智能体页面设计:
+
+| 组件 | 用途 |
+|------|------|
+| `Bubble` | 对话气泡(用户消息 + AI 回复) |
+| `Sender` | 输入框(支持快捷键、附件) |
+| `ThoughtChain` | 思考链展示(显示 LLM 推理过程) |
+| `Suggestion` | 推荐问题(引导用户提问) |
+| `Conversations` | 历史会话列表 |
+
+**关于 Tailwind CSS**:和 Ant Design 不冲突,Ant Design 管业务组件,Tailwind 处理 layout 和细节调整。
+
+#### 1.3 状态管理:TanStack Query + Zustand
+
+**核心理念**:服务端状态和客户端状态分开管理。
+
+| 状态类型 | 工具 | 例子 |
+|----------|------|------|
+| 服务端数据(API 返回) | TanStack Query | 用户信息、wiki 页面、问答历史、日历事件 |
+| 客户端 UI 状态 | Zustand | 侧边栏开关、主题、当前选中项 |
+
+**为什么不用 Redux?**
+
+Redux 太重了,企业级也没必要。Redux Toolkit 可以接受,但 Zustand 的代码量是 Redux 的 1/3,学习成本是 1/5。
+
+**为什么 TanStack Query 是必选?**
+
+它解决了所有前端都头疼的问题:API 数据的缓存、失效、重试、轮询。比如用户切换页面又切回来是否要重新请求、多个组件请求同一个接口如何去重——这些 TanStack Query 自动处理。
+
+### 2. 三大核心模块的实现方案
+
+#### 2.1 飞书登录认证
+
+**推荐:飞书 OAuth 2.0 网页授权 + NextAuth.js (Auth.js v5)**
+
+**流程**:
+
+```
+用户点击"飞书登录"
+  ↓ 跳转到飞书授权页(https://open.feishu.cn/open-apis/authen/v1/index)
+用户同意授权
+  ↓ 飞书回调到你的 callback URL 带 code
+后端用 code 换 access_token,再换用户信息
+  ↓ 生成 JWT 存到 httpOnly cookie
+跳转回应用
+```
+
+**自定义 Feishu Provider 示例**:
+
+```typescript
+// providers/feishu.ts
+import type { OAuthConfig } from "next-auth/providers"
+
+export default function FeishuProvider(config): OAuthConfig {
+  return {
+    id: "feishu",
+    name: "Feishu",
+    type: "oauth",
+    authorization: {
+      url: "https://open.feishu.cn/open-apis/authen/v1/index",
+      params: { app_id: config.appId, redirect_uri: config.redirectUri }
+    },
+    token: "https://open.feishu.cn/open-apis/authen/v1/access_token",
+    userinfo: "https://open.feishu.cn/open-apis/authen/v1/user_info",
+    profile(profile) {
+      return {
+        id: profile.union_id,
+        name: profile.name,
+        email: profile.email,
+        image: profile.avatar_url,
+        deptId: profile.dept_id,
+      }
+    },
+    clientId: config.appId,
+    clientSecret: config.appSecret,
+  }
+}
+```
+
+**关键安全设计**:
+
+| 设计点 | 做法 | 原因 |
+|--------|------|------|
+| Token 存储 | httpOnly cookie | 防 XSS 偷 token |
+| 前端存储 | 不直接存 token | 避免 localStorage 被注入读取 |
+| 权限缓存 | 写进 JWT payload | 避免每次请求都查数据库 |
+| 自动刷新 | access_token 快过期时静默刷新 | 用户无感 |
+
+#### 2.2 智能体问答页
+
+**推荐:Ant Design X + Vercel AI SDK**
+
+要实现的核心能力:
+- 流式输出(一个字一个字蹦出来)
+- 引用 wiki 页面和原始飞书文档(点击可跳转)
+- 多轮对话历史
+- Markdown 渲染(含代码高亮、表格、图片)
+- 反馈按钮(👍/👎 + 文字反馈)
+
+**核心代码示例**(简化版):
+
+```typescript
+'use client'
+import { useChat } from 'ai/react'
+import { Bubble, Sender, ThoughtChain } from '@ant-design/x'
+
+export default function ChatPage() {
+  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
+    api: '/api/chat',  // 后端流式接口
+    onFinish: (message) => {
+      // 自动归档高质量回答到 wiki(后端逻辑)
+    }
+  })
+
+  return (
+    <div className="flex flex-col h-screen">
+      <div className="flex-1 overflow-y-auto p-4">
+        {messages.map(m => (
+          <Bubble
+            key={m.id}
+            content={<MarkdownRenderer content={m.content} />}
+            placement={m.role === 'user' ? 'end' : 'start'}
+            footer={m.role === 'assistant' && (
+              <CitationList sources={m.sources} />
+            )}
+          />
+        ))}
+        {isLoading && <ThoughtChain items={[{title: '正在检索知识库...'}]} />}
+      </div>
+      <Sender
+        value={input}
+        onChange={handleInputChange}
+        onSubmit={handleSubmit}
+        loading={isLoading}
+      />
+    </div>
+  )
+}
+```
+
+**Markdown 渲染推荐**:
+- `react-markdown` + `remark-gfm`(基础表格、任务列表)
+- `rehype-highlight`(代码高亮)
+- `rehype-katex`(数学公式,如果需要)
+
+**引用展示设计**:答案下方折叠面板,展开后显示:
+- 引用的 wiki 页面(带跳转链接)
+- 引用的原始飞书文档(点击跳转飞书)
+- 置信度标识(高/中/低)
+
+#### 2.3 日历模块
+
+**推荐:FullCalendar React**
+
+```bash
+pnpm add @fullcalendar/react @fullcalendar/daygrid @fullcalendar/timegrid @fullcalendar/interaction
+```
+
+**为什么不用 Ant Design Calendar?**
+
+Ant Design 自带的 Calendar 太基础,只能做"日期选择器"级别的展示。FullCalendar 是日历领域的工业标准:
+
+- **多视图**:月视图、周视图、日视图、议程视图
+- **拖拽**:直接拖动事件改时间
+- **资源管理**:多人/多会议室的时间线视图
+- **国际化**:开箱即用的中文支持
+- **打印**:支持打印日历
+
+**和飞书日历集成**:
+
+```typescript
+// 同步飞书日历事件
+async function syncFeishuCalendar(userId: string) {
+  const events = await feishuClient.calendar.events.list({
+    calendar_id: 'primary',
+    start_time: startOfMonth(),
+    end_time: endOfMonth(),
+  })
+
+  return events.map(e => ({
+    id: e.event_id,
+    title: e.summary,
+    start: e.start_time,
+    end: e.end_time,
+    extendedProps: {
+      attendees: e.attendees,
+      location: e.location,
+    }
+  }))
+}
+```
+
+**业务集成点**:
+- 知识库里某些 wiki 页面绑定到日历(如"周会纪要"自动出现在每周一日历上)
+- 智能体可以基于日历回答"明天的会议有哪些资料?"
+
+### 3. 前端项目结构
+
+```
+wiki-frontend/
+├── app/                        # Next.js 15 App Router
+│   ├── (auth)/
+│   │   ├── login/             # 飞书登录页
+│   │   └── callback/          # OAuth 回调
+│   ├── (main)/                # 登录后的主区域
+│   │   ├── chat/              # 智能体问答
+│   │   ├── wiki/              # Wiki 浏览
+│   │   ├── calendar/          # 日历
+│   │   └── admin/             # 管理后台
+│   ├── api/
+│   │   ├── auth/[...nextauth] # NextAuth 路由
+│   │   ├── chat/              # 流式聊天接口
+│   │   └── webhook/feishu/    # 飞书 webhook
+│   └── layout.tsx
+├── components/
+│   ├── chat/                  # 问答相关组件
+│   ├── wiki/                  # Wiki 渲染组件
+│   ├── calendar/              # 日历组件
+│   └── common/                # 通用组件
+├── lib/
+│   ├── feishu/                # 飞书 SDK 封装
+│   ├── api/                   # API 客户端
+│   └── utils/
+├── stores/                    # Zustand stores
+├── hooks/                     # 自定义 hooks
+└── types/                     # TypeScript 类型
+```
+
+### 4. 完整依赖清单
+
+```json
+{
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "antd": "^5.21.0",
+    "@ant-design/x": "^1.0.0",
+    "@ant-design/pro-components": "^2.7.0",
+    "next-auth": "^5.0.0-beta",
+    "@tanstack/react-query": "^5.59.0",
+    "zustand": "^5.0.0",
+    "ai": "^4.0.0",
+    "@fullcalendar/react": "^6.1.0",
+    "@fullcalendar/daygrid": "^6.1.0",
+    "@fullcalendar/timegrid": "^6.1.0",
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
+    "rehype-highlight": "^7.0.0",
+    "axios": "^1.7.0",
+    "dayjs": "^1.11.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^15.0.0",
+    "prettier": "^3.3.0",
+    "husky": "^9.1.0",
+    "lint-staged": "^15.2.0"
+  }
+}
+```
+
+### 5. 后端技术栈
+
+#### MVP 版本
+
+```
+后端框架: FastAPI(Python 3.11+)
+ORM:      SQLAlchemy 2.0
+异步任务: 内置 BackgroundTasks
+LLM:      Anthropic Claude API(claude-sonnet-4-6)
+存储:     Git 仓库 + PostgreSQL
+部署:     阿里云 ECS + Nginx + Docker Compose
+监控:     Uptime Robot(免费)
+```
+
+#### 进阶版本(团队成熟后)
+
+```
+后端框架: FastAPI + Celery(异步任务队列)
+缓存:     Redis(会话 + Token + 任务队列)
+LLM:      Claude(主)+ DeepSeek(降本)+ 本地嵌入模型
+存储:     Git + PostgreSQL + Redis + OSS(原始文档)
+部署:     阿里云 ECS + 容器服务 ACK(可选)
+监控:     Prometheus + Grafana + Sentry
+日志:     ELK 或阿里云 SLS
+```
+
+### 6. 企业级要点清单
+
+不要漏掉这些细节,否则后期返工成本很高:
+
+| 要点 | 推荐方案 | 说明 |
+|------|----------|------|
+| 错误监控 | Sentry / 阿里云 ARMS | 前端报错自动上报 |
+| 埋点统计 | 阿里云 Quick BI / Mixpanel | 哪些功能没人用,决定迭代方向 |
+| 性能监控 | Web Vitals 接入 | LCP、FID、CLS 指标 |
+| 国际化 | next-intl | 即使只做中文,基础架构要有 |
+| CI/CD | GitHub Actions / GitLab CI | 自动 lint、type check、build、部署 |
+| 灰度发布 | Nginx 路由 / Vercel Preview | 内部分批放量 |
+| 代码规范 | ESLint + Prettier + Husky | Pre-commit 自动检查 |
+| 类型检查 | TypeScript strict mode | 别图省事用 any |
+
+### 7. 替代方案对比
+
+如果不想用上述主推方案,这些组合也可以考虑:
+
+| 场景 | 推荐组合 | 适用情况 |
+|------|----------|----------|
+| 极简快速上线 | Vite + React + Ant Design + React Router | 团队小、不需要 SSR |
+| 团队是 Vue 背景 | Nuxt 3 + Vue + Element Plus | 已有 Vue 经验 |
+| 想要极致美观 | Next.js + shadcn/ui + Radix UI | 需要高度定制设计 |
+| 多端覆盖 | Next.js + Capacitor 封装 | 需要 PWA 或移动 App |
+
+但综合考虑**企业级稳定性、团队协作、AI 应用生态**,**Next.js 15 + Ant Design Pro + Ant Design X** 是当前最稳妥的选择。
+
+---
+
+## 十一、参考资源
+
+- Andrej Karpathy 原始 gist:`https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f`
+- LLM Wiki 桌面应用实现:`https://github.com/nashsu/llm_wiki`
+- WikiLLM(中文实践):`https://github.com/wang-junjian/wikillm`
+- Claude Code 官方文档:`https://docs.claude.com/en/docs/claude-code`
+- 飞书开放平台:`https://open.feishu.cn`
+
+---
+
+## 附录 A — Schema 模板示例(CLAUDE.md)
+
+```markdown
+# 知识库维护规则
+
+## 目录结构
+- raw/ : 原始文档,只读
+- wiki/ : LLM 生成内容
+  - entities/ : 实体页(产品、客户、人员)
+  - concepts/ : 概念页(术语、流程)
+  - overviews/ : 综合页
+
+## Ingest 流程
+1. 阅读 raw/ 下的新文档
+2. 提取实体和关键概念
+3. 在 wiki/ 创建或更新对应页面
+4. 维护反向链接 [[...]]
+5. 更新 index.md
+6. 在 log.md 追加一行
+
+## 页面格式约定
+每个 wiki 页面以 frontmatter 开头:
+
+---
+title: 页面标题
+type: entity / concept / overview
+access: public / dept-xxx / admin
+sources: [原始文档路径列表]
+last_updated: YYYY-MM-DD
+---
+
+正文用 markdown,内部引用用 [[页面名]]。
+
+## Query 流程
+1. 读 index.md 找相关页面(最多 5 篇)
+2. 深读这些页面
+3. 综合答案,标注引用
+4. 如答案有价值,归档为新 overview 页面
+
+## Lint 检查项
+- 孤立页面(没被任何页面引用)
+- 断链([[xxx]] 找不到目标)
+- 矛盾陈述(两个页面说法冲突)
+- 长期未更新页面(超过 3 个月)
 ```
 
 ---
 
-## 10. MVP 范围与后续迭代
+## 附录 B — 风险与应对
 
-### 10.1 MVP 范围(本期)
-
-- ✅ 飞书 Wiki / docx 文档全量 + 增量同步
-- ✅ 基于标题的智能分块
-- ✅ 向量检索 + 权限过滤
-- ✅ 合规校验(合格投资者 + 输出扫描)
-- ✅ 带引用的 LLM 问答
-- ✅ 对话审计留痕
-- ✅ 飞书机器人单聊 / 群 @ 问答
-
-### 10.2 Phase 2(1-2 个月后)
-
-- 表格 / 多维表格结构化解析(当前占位)
-- 图片 OCR + VLM 描述(研报图表很关键)
-- Reranker 接入(bge-reranker-v2-m3)
-- BM25 + 向量混合检索
-- Langfuse 接入,可观测性
-- 飞书卡片交互(追问、点赞点踩、快速反馈)
-- 会话多轮上下文管理(Redis)
-
-### 10.3 Phase 3(3-6 个月后)
-
-- 知识图谱(Neo4j)存储 基金—管理人—底层资产—关联方 关系
-- 工具调用:查净值、查持仓、生成日报
-- 多 Agent 协作:研究 Agent / 合规 Agent / 客服 Agent
-- LangGraph 升级工作流引擎
-- 定向微调(私募领域语料)
-- 对外部合格投资者开放(需额外的身份认证流程)
-
-### 10.4 技术债务 & 已知限制
-
-- 当前 block_parser.py 表格渲染为占位符,需要完整实现
-- 权限同步依赖飞书 API,大批量文档时有限频风险,需加退避和分批
-- MVP 未做 Reranker,检索精度在文档量大时会下降
-- 未集成可观测性,线上问题排查靠日志
-- 合格投资者认证当前是白名单表,生产环境需对接 KYC 系统
+| 风险 | 影响 | 应对 |
+|------|------|------|
+| LLM 幻觉 | 用户得到错误答案 | 强制返回引用,用户可追溯原文 |
+| 敏感信息泄露 | 越权访问 | 三级权限 + API 鉴权 + 审计日志 |
+| 知识库陈旧 | 答案过时 | 自动同步 + 月度 lint + 用户反馈 |
+| LLM API 涨价 | 成本失控 | 多模型混用 + 缓存 + 用量预警 |
+| 单点故障 | 服务不可用 | 数据每日备份 + 关键路径降级方案 |
+| 用户流失 | 没人用变成废物 | 入口集成飞书 + 高频问题归档为 FAQ |
 
 ---
 
-## 11. 附录
-
-### 附录 A:关键配置项说明
-
-见 `.env.example`,其中关键项:
-
-| 变量 | 示例值 | 说明 |
-|------|-------|------|
-| FEISHU_APP_ID | cli_xxxxx | 飞书自建应用 ID |
-| FEISHU_APP_SECRET | xxxxx | 飞书应用密钥 |
-| QDRANT_URL | http://localhost:6333 | 向量库地址 |
-| QDRANT_COLLECTION | pe_kb_chunks | 向量库集合名 |
-| POSTGRES_DSN | postgresql://... | PG 连接串 |
-| DASHSCOPE_API_KEY | sk-xxxxx | 通义千问 API Key |
-| EMBEDDING_MODEL | text-embedding-v3 | Embedding 模型 |
-| EMBEDDING_DIM | 1024 | Embedding 维度 |
-| LLM_MODEL | qwen-max | LLM 模型 |
-
-#### scheduler_service 专属配置
-
-| 变量 | 示例值 | 说明 |
-|------|-------|------|
-| SCHEDULER_TARGET_OPEN_ID | ou_xxxxx | 推送目标用户的飞书 open_id |
-| SCHEDULER_HOUR | 15 | 推送小时（24小时制） |
-| SCHEDULER_MINUTE | 30 | 推送分钟 |
-| BITABLE_APP_ID | Ray2bF0z2aBy3ps3fZecEobrn7g | 飞书多维表格 App Token |
-| BITABLE_TABLE_ID | tblAhzosed0LG3SJ | 多维表格数据表 ID |
-| MARKET_INDICES | 上证指数,创业板指,科创50,沪深300 | 追踪的指数列表 |
-
-### 附录 B:合规相关配置
-
-**触发合格投资者校验的关键词** (`compliance.py`)
-
-```
-净值、持仓、业绩、收益率、认购、申购、起投、
-年化、回撤、管理费、业绩报酬、封闭期、赎回
-```
-
-**输出屏蔽关键词**
-
-```
-保本、稳赚、保证.{0,5}收益、零风险、内幕、刚性兑付
-```
-
-**风险提示模板**
-
-> 本回答基于内部知识库生成,仅供参考,不构成投资建议。私募基金投资具有较高风险,过往业绩不代表未来表现。投资前请仔细阅读基金合同和风险揭示书。
-
-### 附录 C:飞书 API 主要端点速查
-
-| 场景 | Endpoint | 说明 |
-|------|---------|------|
-| 获取 tenant_access_token | `POST /auth/v3/tenant_access_token/internal` | 2h 有效 |
-| 列出知识空间 | `GET /wiki/v2/spaces` | 分页 |
-| 遍历 wiki 节点 | `GET /wiki/v2/spaces/{space_id}/nodes` | 按 parent_node_token |
-| 获取 docx blocks | `GET /docx/v1/documents/{document_id}/blocks` | 分页,page_size=500 |
-| 获取 docx 纯文本 | `GET /docx/v1/documents/{document_id}/raw_content` | 兜底方案 |
-| 获取文档成员权限 | `GET /drive/v1/permissions/{token}/members` | 权限透传核心 |
-| 发送消息卡片 | `POST /im/v1/messages` | 支持 interactive 卡片 |
-
----
-
-**文档负责人**:[待填]
-**评审状态**:待内部评审
+*本文档由 Claude 协助生成,可根据实际项目情况持续迭代。*

@@ -1,0 +1,26 @@
+# wiki_service - LLM Wiki 服务
+# 使用: docker compose up -d
+#
+# 前置条件:
+#   1. 阿里云 ECS (2u4g 够用)
+#   2. 飞书自建应用 (App ID + App Secret)
+#   3. Claude API Key
+
+services:
+  wiki_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wiki-service
+    environment:
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - WIKI_REPO_PATH=/app/wiki_repo
+      - TZ=Asia/Shanghai
+    volumes:
+      # 挂载本地 wiki_repo 方便本地开发调试
+      - ./wiki_repo:/app/wiki_repo
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

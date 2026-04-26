@@ -1,0 +1,70 @@
+# ECS 部署配置（scheduler_service + wiki_service + frontend）
+# 架构: ECS(2u4g) 运行三个容器，无本地数据库依赖
+# 使用: docker compose -f docker-compose.ecs.yml up -d
+#
+# 前置条件:
+#   1. 阿里云 ECS (2u4g 够用)
+#   2. 飞书自建应用（App ID + App Secret）
+#   3. 已配置域名解析
+
+version: '3.8'
+
+services:
+  scheduler_service:
+    build:
+      context: ./scheduler_service
+      dockerfile: Dockerfile
+    container_name: pe-kb-scheduler
+    environment:
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - SCHEDULER_TARGET_OPEN_ID=${SCHEDULER_TARGET_OPEN_ID}
+      - BITABLE_APP_ID=${BITABLE_APP_ID}
+      - BITABLE_TABLE_ID=${BITABLE_TABLE_ID}
+      - DECREMENT_SHEET_TOKEN=${DECREMENT_SHEET_TOKEN}
+      - DECREMENT_SHEET_ID=${DECREMENT_SHEET_ID}
+      - MONTHLY_DECREMENT=${MONTHLY_DECREMENT:-0.5}
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  wiki_service:
+    build:
+      context: ./wiki_service
+      dockerfile: Dockerfile
+    container_name: wiki-service
+    environment:
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-7}
+      - WIKI_REPO_PATH=/app/wiki_repo
+      - FEISHU_FOLDER_FANFEI=${FEISHU_FOLDER_FANFEI}
+      - FEISHU_FOLDER_CHANPIN=${FEISHU_FOLDER_CHANPIN}
+      - FEISHU_FOLDER_ZHUANHUAN=${FEISHU_FOLDER_ZHUANHUAN}
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./wiki_service/wiki_repo:/app/wiki_repo
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  wiki_frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wiki-frontend
+    environment:
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - NEXT_PUBLIC_WIKI_SERVICE_URL=http://wiki_service:8001
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
