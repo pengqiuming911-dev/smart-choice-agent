@@ -20,7 +20,8 @@ services:
       - SCHEDULER_MINUTE=30
       - BITABLE_APP_ID=Ray2bF0z2aBy3ps3fZecEobrn7g
       - BITABLE_TABLE_ID=tblAhzosed0LG3SJ
-      - MARKET_INDICES=沪深300,中证500,中证1000,纳指ETF
+      - DECREMENT_SHEET_TOKEN=HdxnsNXSQhKoSItKiLwcnEmjn8b
+      - DECREMENT_SHEET_ID=3JiyjX
       - MONTHLY_DECREMENT=0.5
     restart: unless-stopped
     extra_hosts:

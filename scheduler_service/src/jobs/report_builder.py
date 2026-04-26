@@ -18,13 +18,28 @@ Build daily market + product report for Feishu card
 - 派息点位
 - 保证金比例（如 20%）
 - 客户数
-- 每月递减（参考表格值，暂用配置常量 0.5%）
+- 每月递减（来自「每月递减参考表」spreadsheet，按航班编号查找）
+
+每月递减参考表字段（来自飞书电子表格）:
+- 航班编号
+- 每月递减（如 0.5 表示 0.5%）
 """
 from datetime import datetime
 from typing import List, Dict, Optional
 from src.market_data import get_indices_batch
-from src.feishu_bitable import query_product_table
+from src.feishu_bitable import query_product_table, build_monthly_decrement_map
 from src.config import settings
+
+# Lazy-loaded monthly decrement map (flight_no → decrement %)
+_DECREMENT_MAP: Optional[Dict[str, float]] = None
+
+
+def _get_decrement_map() -> Dict[str, float]:
+    """Lazy-load monthly decrement map from reference spreadsheet"""
+    global _DECREMENT_MAP
+    if _DECREMENT_MAP is None:
+        _DECREMENT_MAP = build_monthly_decrement_map()
+    return _DECREMENT_MAP
 
 
 # =============================================================================
@@ -187,10 +202,17 @@ def parse_product_record(fields: Dict) -> Optional[Dict]:
         margin = to_float(fields.get(F_MARGIN_RATIO, 0))            # 保证金比例
         customer_count = to_int(fields.get(F_CUSTOMER_COUNT, 0))     # 客户数
 
-        # 每月递减（优先用 Bitable 字段值，否则用配置常量）
-        monthly_decrement = to_float(fields.get(F_MONTHLY_DECREMENT, 0))
-        if monthly_decrement == 0:
-            monthly_decrement = settings.monthly_decrement
+        # 每月递减（优先级：参考表spreadsheet > Bitable字段 > 全局配置）
+        flight_no_str = str(name).strip()
+        decrement_map = _get_decrement_map()
+        monthly_decrement = decrement_map.get(flight_no_str, None)
+        if monthly_decrement is None:
+            # Bitable 字段值为空/不存在时用全局配置；字段有具体值（含0）时直接用
+            raw = fields.get(F_MONTHLY_DECREMENT)
+            if raw is None or (isinstance(raw, str) and raw.strip() in ("", "无", "None", "-", "N/A", "NA")):
+                monthly_decrement = settings.monthly_decrement
+            else:
+                monthly_decrement = to_float(raw)
 
         # 敲出点位：优先用表格预计算值（单位万元），否则自己算
         first_ko_pre = to_float(fields.get(F_KNOCK_OUT_POINT_PRE, 0))

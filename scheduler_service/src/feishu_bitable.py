@@ -6,6 +6,10 @@ from typing import List, Dict, Optional
 from src.config import settings
 
 
+# Feishu spreadsheet API base (v2)
+_SPREADSHEET_BASE_URL = "https://open.feishu.cn/open-apis/sheets/v2"
+
+
 class FeishuBitableClient:
     """Query Feishu Bitable records via Feishu Open API"""
 
@@ -198,3 +202,72 @@ def build_index_code_map() -> Dict[str, str]:
                 seen_codes.add(num)
 
     return code_map
+
+
+def _get_spreadsheet_token() -> str:
+    """Get tenant access token for spreadsheet API"""
+    import time
+    token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    resp = httpx.post(
+        token_url,
+        json={"app_id": settings.feishu_app_id, "app_secret": settings.feishu_app_secret},
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"Failed to get Feishu token: {data}")
+    return data["tenant_access_token"]
+
+
+def build_monthly_decrement_map() -> Dict[str, float]:
+    """
+    从「每月递减参考表」spreadsheet 中查询航班编号→每月递减比例的映射
+
+    spreadsheet URL: https://.../sheets/{token}?sheet={sheetId}
+    字段: 航班编号, 每月递减
+
+    Returns:
+        {"航班编号1": 0.5, "航班编号2": 0.3, ...}
+    """
+    if not settings.decrement_sheet_token or not settings.decrement_sheet_id:
+        print("[WARN] DECREMENT_SHEET_TOKEN or DECREMENT_SHEET_ID not configured")
+        return {}
+
+    try:
+        token = _get_spreadsheet_token()
+        range_str = f"{settings.decrement_sheet_id}!A:B"  # A=航班编号, B=每月递减
+        resp = httpx.get(
+            f"{_SPREADSHEET_BASE_URL}/spreadsheets/{settings.decrement_sheet_token}/values/{range_str}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        result = resp.json()
+        if result.get("code") != 0:
+            print(f"[ERROR] Failed to query spreadsheet: {result}")
+            return {}
+
+        values = result.get("data", {}).get("valueRange", {}).get("values", [])
+        if not values:
+            return {}
+
+        # Skip header row, parse data rows
+        decrement_map = {}
+        for row in values[1:]:
+            if len(row) < 2:
+                continue
+            flight_no = str(row[0]).strip() if row[0] else ""
+            decrement_str = str(row[1]).strip() if row[1] else ""
+            if not flight_no:
+                continue
+            try:
+                # 支持 "0.5%" 或 "0.5" 格式
+                val = float(decrement_str.replace("%", "").replace("％", ""))
+                decrement_map[flight_no] = val
+            except ValueError:
+                pass
+
+        print(f"[INFO] Loaded {len(decrement_map)} monthly decrement entries from reference sheet")
+        return decrement_map
+    except Exception as e:
+        print(f"[ERROR] Failed to load monthly decrement map: {e}")
+        return {}
