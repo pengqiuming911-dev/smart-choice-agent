@@ -1,14 +1,5 @@
-"""CLI entry point for wiki_service
-
-Usage:
-    python -m src.commands ingest <raw_doc_path>
-    python -m src.commands query "用户问题"
-    python -m src.commands lint
-    python -m src.commands sync              # 同步飞书文档
-    python -m src.commands serve              # 启动 FastAPI
-"""
+"""CLI entry point - now delegates to new modular structure"""
 import sys
-import json
 import click
 from loguru import logger
 
@@ -18,7 +9,7 @@ logger.add(sys.stderr, level="INFO")
 
 @click.group()
 def cli():
-    """LLM Wiki Agent CLI"""
+    """LLM Wiki Agent CLI - WikiRepo架构(见 ARCHITECTURE.md)"""
     pass
 
 
@@ -26,7 +17,7 @@ def cli():
 @click.argument("doc_path")
 def ingest(doc_path: str):
     """摄入原始文档到知识库"""
-    from src.wiki_agent import WikiAgent
+    from src.agent.wiki_agent import WikiAgent
 
     agent = WikiAgent()
     try:
@@ -44,7 +35,7 @@ def ingest(doc_path: str):
 @click.option("--user-id", default=None, help="用户 ID")
 def query(question: str, user_id: str = None):
     """向知识库提问"""
-    from src.wiki_agent import WikiAgent
+    from src.agent.wiki_agent import WikiAgent
 
     agent = WikiAgent()
     try:
@@ -70,7 +61,7 @@ def query(question: str, user_id: str = None):
 @cli.command()
 def lint():
     """检查知识库健康状态"""
-    from src.wiki_agent import WikiAgent
+    from src.agent.wiki_agent import WikiAgent
 
     agent = WikiAgent()
     try:
@@ -115,8 +106,8 @@ def lint():
 def sync(space_id: str = None):
     """同步飞书知识空间文档"""
     from src.config import settings
-    from src.feishu_client import FeishuClient
-    from src.wiki_agent import WikiAgent
+    from src.sync import FeishuClient
+    from src.agent.wiki_agent import WikiAgent
 
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         click.echo("❌ 缺少飞书配置: FEISHU_APP_ID / FEISHU_APP_SECRET", err=True)
@@ -135,18 +126,16 @@ def sync(space_id: str = None):
         docx_nodes = [n for n in nodes if n.obj_type == "docx"]
         click.echo(f"   其中 {len(docx_nodes)} 个 docx 文档")
 
-        for node in docx_nodes[:10]:  # 先处理前 10 个
+        for node in docx_nodes[:10]:
             click.echo(f"   📄 {node.title}...")
             try:
                 md_content = client.get_docx_markdown(node.node_token)
-                # Save to raw/
-                safe_name = re.sub(r'[^\w\-\u4e00-\u9fff]', '_', node.title)
+                safe_name = f"feishu_{node.node_token[:8]}"
                 raw_path = settings.raw_dir / "articles" / f"{safe_name}.md"
                 raw_path.parent.mkdir(parents=True, exist_ok=True)
                 raw_path.write_text(md_content, encoding="utf-8")
 
-                # Trigger ingest
-                result = agent.ingest(str(raw_path.relative_to(settings.repo_path)))
+                result = agent.ingest(str(raw_path.relative_to(settings.wiki_repo_path)))
                 click.echo(f"      ✅ +{result['pages_created']}/~{result['pages_updated']}")
             except Exception as e:
                 click.echo(f"      ❌ {e}", err=True)
@@ -162,12 +151,11 @@ def sync(space_id: str = None):
 def serve():
     """启动 FastAPI 服务"""
     import uvicorn
-    from src.api import app
+    from src.api.app import app
 
     click.echo("🚀 启动 wiki_service API...")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
 
 
 if __name__ == "__main__":
-    import re
     cli()

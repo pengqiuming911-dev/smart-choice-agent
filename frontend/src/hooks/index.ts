@@ -1,0 +1,1 @@
+export { useWikiQuery } from './useWikiQuery';

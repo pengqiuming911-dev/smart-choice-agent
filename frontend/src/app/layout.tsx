@@ -1,27 +1,30 @@
-import type { Metadata } from "next"
-import "./globals.css"
-import { Providers } from "@/providers/Providers"
-import { AntdRegistry } from '@ant-design/nextjs-registry'
+'use client';
 
-export const metadata: Metadata = {
-  title: "LLM Wiki 智能知识库",
-  description: "团队智能知识库问答系统",
-}
+import { ConfigProvider } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
+import type { ThemeConfig } from 'antd';
+
+const theme: ThemeConfig = {
+  token: {
+    colorPrimary: '#3B6AF8',
+    borderRadius: 8,
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
+  },
+};
 
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: React.ReactNode;
 }) {
   return (
     <html lang="zh-CN">
       <body>
-        <Providers>
-          <AntdRegistry>
-            {children}
-          </AntdRegistry>
-        </Providers>
+        <ConfigProvider locale={zhCN} theme={theme}>
+          {children}
+        </ConfigProvider>
       </body>
     </html>
-  )
+  );
 }

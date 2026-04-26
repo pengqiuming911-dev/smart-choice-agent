@@ -1,33 +1,30 @@
-version: '3.8'
-
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: pe-kb-qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - ./data/qdrant:/qdrant/storage
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16
-    container_name: pe-kb-postgres
+  wiki_service:
+    build:
+      context: ./wiki_service
+      dockerfile: Dockerfile
+    container_name: wiki-service
     environment:
-      POSTGRES_USER: pekb
-      POSTGRES_PASSWORD: pekb_dev_password
-      POSTGRES_DB: pekb
-    ports:
-      - "5432:5432"
+      - FEISHU_APP_ID=${FEISHU_APP_ID}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - WIKI_REPO_PATH=/app/wiki_repo
+      - TZ=Asia/Shanghai
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./wiki_service/wiki_repo:/app/wiki_repo
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-  redis:
-    image: redis:7-alpine
-    container_name: pe-kb-redis
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wiki-frontend
     ports:
-      - "6379:6379"
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://wiki_service:8080
     restart: unless-stopped
+    depends_on:
+      - wiki_service

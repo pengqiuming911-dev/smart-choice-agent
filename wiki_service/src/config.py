@@ -1,4 +1,4 @@
-"""Configuration for wiki_service"""
+"""Configuration for wiki_service - aligns with ARCHITECTURE.md三层架构"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
@@ -6,27 +6,30 @@ from pathlib import Path
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Feishu
+    # LLM Provider - support Claude or MiniMax
+    llm_provider: str = "claude"  # "claude" or "minimax"
+
+    # Feishu (optional - for sync)
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
 
     # Claude API
     claude_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-7"
 
-    # Wiki repository
+    # MiniMax API (alternative to Claude)
+    minimax_api_key: str = ""
+    minimax_api_base: str = "https://api.minimax.chat/v1"
+
+    # Wiki repository - Git仓库结构定义在 ARCHITECTURE.md 第二章
     wiki_repo_path: Path = Path(__file__).parent.parent / "wiki_repo"
 
-    # Feishu sync
-    feishu_space_id: str = ""  # 知识空间 ID，留空则使用第一个空间
-    feishu_folder_fanfei: str = ""   # 返费文件夹 token
-    feishu_folder_chanpin: str = ""  # 产品运营文件夹 token
-    feishu_folder_zhuanhuan: str = ""  # 转换运营文件夹 token
-    feishu_high_freq: bool = True  # 高频文档每天同步
+    # Feishu sync (optional)
+    feishu_space_id: str = ""
 
-    # Ingest
-    max_ingest_tokens: int = 6000  # 单次 ingest 最大 token 预算
+    # Ingest token budget
+    max_ingest_tokens: int = 6000
 
+    # Derived paths - WikiRepo 结构
     @property
     def claude_md_path(self) -> Path:
         return self.wiki_repo_path / "CLAUDE.md"
@@ -46,6 +49,23 @@ class Settings(BaseSettings):
     @property
     def log_md_path(self) -> Path:
         return self.wiki_dir / "log.md"
+
+    # Subdirectories
+    @property
+    def raw_articles_dir(self) -> Path:
+        return self.raw_dir / "articles"
+
+    @property
+    def raw_pdfs_dir(self) -> Path:
+        return self.raw_dir / "pdfs"
+
+    @property
+    def raw_meeting_notes_dir(self) -> Path:
+        return self.raw_dir / "meeting-notes"
+
+    @property
+    def raw_tables_dir(self) -> Path:
+        return self.raw_dir / "tables"
 
 
 settings = Settings()
